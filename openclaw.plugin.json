@@ -1,0 +1,50 @@
+{
+  "id": "outline-wiki-openclaw-plugin",
+  "name": "Outline Wiki",
+  "description": "Native Outline Wiki knowledge-base integration for OpenClaw. 12 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents}, outline_attachment_upload. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15).",
+  "version": "0.4.0",
+  "skills": [
+    "./skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiToken": {
+        "type": "string",
+        "description": "Outline API bearer token (used for all doc/collection/search/attachment methods)."
+      },
+      "endpoint": {
+        "type": "string",
+        "description": "Outline API base URL, e.g. https://wiki.dev.cereb.ai/api"
+      },
+      "mcpEndpoint": {
+        "type": "string",
+        "description": "Outline MCP endpoint for S3 pre-signed attachment uploads, e.g. https://wiki.dev.cereb.ai/mcp"
+      },
+      "defaultCollectionId": {
+        "type": "string",
+        "description": "Optional default collection id for outline_doc_create calls."
+      }
+    },
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "outline_doc_list",
+      "outline_doc_get",
+      "outline_doc_create",
+      "outline_doc_update",
+      "outline_doc_delete",
+      "outline_doc_archive",
+      "outline_doc_restore",
+      "outline_doc_move",
+      "outline_search_query",
+      "outline_collection_list",
+      "outline_collection_documents",
+      "outline_attachment_upload"
+    ]
+  }
+}
