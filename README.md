@@ -4,7 +4,7 @@
 [![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](package.json)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-%3E%3D2026.5.17-purple.svg)](https://docs.openclaw.ai)
 
-OpenClaw native plugin for Outline Wiki knowledge bases — exposes 13 named tools (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy `mcporter + Outline MCP` channel with a single dispatcher-friendly tool surface.
+OpenClaw native plugin for Outline Wiki knowledge bases — exposes 13 named tools (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy single-dispatcher pattern with one named tool per Outline REST method.
 
 ## Features
 

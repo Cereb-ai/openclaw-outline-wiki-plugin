@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-06
 
 ### Added
-- Initial implementation: read-only methods (`documents.list`, `documents.info`, `collections.list`) over the `mcporter` + Outline MCP channel.
+- Initial implementation: read-only methods (`documents.list`, `documents.info`, `collections.list`) over the legacy single-dispatcher shape.
 
 [Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/releases/tag/v0.4.0
