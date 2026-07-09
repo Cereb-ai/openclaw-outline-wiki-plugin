@@ -2,7 +2,21 @@
   "name": "@cereb/outline-wiki-openclaw-plugin",
   "version": "0.4.0",
   "type": "module",
-  "private": true,
+  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 13 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool.",
+  "license": "MIT",
+  "author": {
+    "name": "Leo Wang",
+    "email": "wanglingsong@gmail.com",
+    "url": "https://github.com/LeoWangCereb"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cereb-ai/openclaw-outline-wiki-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/issues"
+  },
+  "homepage": "https://github.com/Cereb-ai/openclaw-outline-wiki-plugin#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
