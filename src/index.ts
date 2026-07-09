@@ -2,17 +2,17 @@
  * outline-wiki OpenClaw native plugin
  *
  * 0.4.0 migration: switched from a single dispatcher tool `outline_wiki`
- * (definePluginEntry) to 12 independent named tools (defineToolPlugin).
+ * (definePluginEntry) to 13 independent named tools (defineToolPlugin).
  * Each tool's parameters are a flat TypeBox object of the method's args,
  * and OpenClaw's tool-discovery manifest reads the static metadata without
  * loading this runtime code. Same handler logic, one tool per outline
  * category.method (no more `{category, method, args}` envelope).
  *
- * Tool inventory (12):
+ * Tool inventory (13):
  *   - outline_doc_list           — list documents (returns text in payload)
  *   - outline_doc_get            — single document + full markdown body
  *   - outline_doc_create         — create a new document (publish=true default; accepts parentDocumentId)
- *   - outline_doc_update         — update text/title. **parentDocumentId is rejected** (0.4.0 inherits 0.3.1 fail-fast — use outline_doc_move).
+ *   - outline_doc_update         — update text/title. **parentDocumentId is rejected** (0.4.0 inherits 0.3.1 fail-fast — use outline_doc_move). Optional `changelog` writes a revision name (best-effort).
  *   - outline_doc_delete         — trash (default) or hard-delete (permanent=true)
  *   - outline_doc_archive        — move to archive
  *   - outline_doc_restore        — restore from archive
@@ -20,6 +20,7 @@
  *   - outline_search_query       — full-text search
  *   - outline_collection_list    — list all collections
  *   - outline_collection_documents — list documents in a collection
+ *   - outline_rev_log            — revision metadata (name/timestamp/author) for a document (no body text)
  *   - outline_attachment_upload  — upload via S3 presigned POST (url OR local path)
  *
  * Source-of-truth for the priority list: cereb-pilot (the heaviest user of
@@ -60,13 +61,13 @@ const configSchema = Type.Object(
     endpoint: Type.Optional(
       Type.String({
         description:
-          "Outline API base URL, e.g. https://wiki.dev.cereb.ai/api",
+          "Outline API base URL, e.g. https://your-outline.example.com/api",
       }),
     ),
     mcpEndpoint: Type.Optional(
       Type.String({
         description:
-          "Outline MCP endpoint for S3 pre-signed attachment uploads, e.g. https://wiki.dev.cereb.ai/mcp",
+          "Outline MCP endpoint for S3 pre-signed attachment uploads, e.g. https://your-outline.example.com/mcp",
       }),
     ),
     defaultCollectionId: Type.Optional(
@@ -82,7 +83,7 @@ export default defineToolPlugin({
   id: PLUGIN_ID,
   name: "Outline Wiki",
   description:
-    "Native Outline Wiki knowledge-base integration for OpenClaw. 12 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents}, outline_attachment_upload. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15).",
+    "Native Outline Wiki knowledge-base integration for OpenClaw. 13 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents}, outline_rev_log, outline_attachment_upload. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15), and accepts an optional `changelog` string that is written to the latest revision's `name` field (best-effort, non-fatal).",
   configSchema,
   activation: { onStartup: true },
   tools: (tool) => [
@@ -161,7 +162,7 @@ export default defineToolPlugin({
       name: "outline_doc_update",
       label: "Outline Update Document",
       description:
-        "Update an existing document's `text` and/or `title` (`editMode=replace` default). Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — the outline server silently drops it (verified 2026-06-08). To reparent, use `outline_doc_move`. Optional: `publish` (bool).",
+        "Update an existing document's `text` and/or `title` (`editMode=replace` default). Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — the outline server silently drops it (verified 2026-06-08). To reparent, use `outline_doc_move`. Optional: `publish` (bool), `changelog` (string — after a successful update the plugin best-effort writes this string into the latest revision's `name` field via `revisions.update`; failures are logged in the response `warnings` array but do not fail the main update).",
       parameters: Type.Object({
         id: Type.String({ description: "Outline document UUID." }),
         title: Type.Optional(Type.String({ description: "New title." })),
@@ -178,6 +179,12 @@ export default defineToolPlugin({
           }),
         ),
         publish: Type.Optional(Type.Boolean({ description: "Publish on update." })),
+        changelog: Type.Optional(
+          Type.String({
+            description:
+              "Optional human-readable summary written to the latest revision's `name` field via `revisions.update` after a successful update. Best-effort: failures are non-fatal and surfaced in the response's `warnings`.",
+          }),
+        ),
       }),
       async execute(args, cfg) {
         return await docUpdate(args, cfg as OutlineWikiConfig);
@@ -299,6 +306,26 @@ export default defineToolPlugin({
       },
     }),
     tool({
+      name: "outline_rev_log",
+      label: "Outline Revision Log",
+      description:
+        "Get revision changelog for a document (metadata only: name, timestamp, author). Returns up to N recent revisions, stripped of body text/data/collaborators — safe to call frequently to surface change history. Calls `revisions.list`. Required: `documentId` (UUID). Optional: `limit` (number, default 5, max 20).",
+      parameters: Type.Object({
+        documentId: Type.String({ description: "Outline document UUID." }),
+        limit: Type.Optional(
+          Type.Integer({
+            minimum: 1,
+            maximum: 20,
+            description: "Max revisions to return (default 5, max 20).",
+            default: 5,
+          }),
+        ),
+      }),
+      async execute(args, cfg) {
+        return await revLog(args, cfg as OutlineWikiConfig);
+      },
+    }),
+    tool({
       name: "outline_attachment_upload",
       label: "Outline Upload Attachment",
       description:
@@ -393,10 +420,8 @@ async function docGet(
   // Single-step: documents.info already returns metadata + the full markdown
   // body in `data.text`. The legacy mcporter path forced a second
   // documents.export call to get the body; the plugin hides that dance.
-  // (Verified 2026-06-07 against wiki.dev.cereb.ai — `info` payload includes
-  // `text` for normal documents. If a future revision ever returns text=null
-  // we can fall back to documents.export, but no need to pay the extra round
-  // trip on the happy path.)
+  // If a future outline revision returns `text=null` for some documents,
+  // fall back to documents.export; until then no extra round trip needed.
   try {
     const info = await outlineFetch(cfg, "documents.info", { id: args.id });
     return textResult({
@@ -514,8 +539,9 @@ async function docUpdate(
         "To reparent a document, use `outline_doc_move` with the new `collectionId` (same collection is fine) and the new `parentDocumentId`. " +
         "Example: outline_doc_move {id, collectionId, parentDocumentId: '<new-parent-uuid>'}.",
       hint:
-        "Verified 2026-06-08 against wiki.dev.cereb.ai: documents.update ignores parentDocumentId, " +
-        "documents.move honors it. See README 踩坑清单 12 and SKILL.md 避坑清单 15.",
+        "documents.update's schema does not include parentDocumentId — outline server silently drops it (silent drop verified 2026-06-08). " +
+        "To reparent, use `outline_doc_move` with the new `collectionId` and `parentDocumentId`. " +
+        "See README 踩坑清单 12 and SKILL.md 避坑清单 15.",
     });
   }
   // At least one of text/title must be present, otherwise the call is a no-op
@@ -549,9 +575,27 @@ async function docUpdate(
   }
   if (typeof args.publish === "boolean") body.publish = args.publish;
 
+  // Track warnings for best-effort post-update side-effects (e.g. changelog
+  // writing via revisions.update). Non-fatal — main update succeeds even if
+  // these fail; we just collect the messages and surface them in the
+  // response so the agent can decide whether to retry.
+  const warnings: string[] = [];
+
   try {
     const data = await outlineFetch(cfg, "documents.update", body);
     const updated = data?.data ?? null;
+
+    // Best-effort changelog: if the caller provided `changelog`, look up the
+    // latest revision for this document and write the string into its `name`
+    // field. Failures here are non-fatal — the main update has already
+    // succeeded, so we log into `warnings` and continue.
+    if (typeof args.changelog === "string" && args.changelog.length > 0) {
+      const changelogResult = await writeChangelog(args.id, args.changelog, cfg);
+      if ("warning" in changelogResult) {
+        warnings.push(changelogResult.warning);
+      }
+    }
+
     return textResult({
       ok: true,
       method: "documents.update",
@@ -567,6 +611,7 @@ async function docUpdate(
             updatedAt: updated.updatedAt ?? null,
           }
         : null,
+      warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (err) {
     return textResult({ error: `documents.update failed: ${errorMessage(err)}` });
@@ -880,10 +925,9 @@ async function attachmentUpload(
     });
   }
 
-  // Legacy / pre-S3 outline servers (verified on wiki.dev.cereb.ai, 2026-06-08)
-  // hand back a relative `/api/files.create` URL here instead of a real S3
-  // presigned POST. `files.create` is cookie-only auth (verified 2026-06-07
-  // during AC-002 screenshot uploads), so a Bearer-token PUT from this
+  // Legacy / pre-S3 outline servers hand back a relative
+  // `/api/files.create` URL here instead of a real S3 presigned POST.
+  // `files.create` is cookie-only auth, so a Bearer-token PUT from this
   // plugin will always 401/403. We detect the legacy URL up front and
   // surface a clear hint so callers know to switch to url mode or the
   // outline web UI instead of seeing a confusing S3 / 401 / 403 trace.
@@ -1016,6 +1060,109 @@ async function collectionDocuments(
   }
 }
 
+async function revLog(
+  args: Record<string, unknown>,
+  cfg: OutlineWikiConfig,
+) {
+  const guard = requireConfig(cfg);
+  if (guard) return guard;
+  if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+    return textResult({
+      error:
+        "outline_rev_log requires a non-empty `documentId` (string) argument.",
+    });
+  }
+  // Clamp limit into [1, 20] with a default of 5. The TypeBox schema already
+  // declares maximum: 20, so OpenClaw should refuse larger values before we
+  // get here — but clamp defensively in case the schema is loosened later.
+  const rawLimit = pickNumber(args.limit, 5);
+  const limit = Math.min(20, Math.max(1, Math.trunc(rawLimit)));
+
+  const body: Record<string, unknown> = {
+    documentId: args.documentId,
+    limit,
+  };
+
+  try {
+    const data = await outlineFetch(cfg, "revisions.list", body);
+    const rawRevisions: unknown[] = Array.isArray(data?.data)
+      ? data.data
+      : [];
+    // Strip heavy revision fields (`text`, `data`, `collaborators`, `color`,
+    // `deletedAt`, etc.) and return only the metadata useful for a changelog
+    // view: id, name (i.e. the human-readable changelog if any), createdAt,
+    // and the author's display name. This keeps the response cheap to
+    // serialize even on documents with hundreds of revisions.
+    const revisions = rawRevisions.map((r) => {
+      const rev = r as Record<string, unknown>;
+      const createdBy = rev.createdBy as Record<string, unknown> | undefined;
+      return {
+        id: rev.id ?? null,
+        name: rev.name ?? null,
+        createdAt: rev.createdAt ?? null,
+        createdByName: createdBy?.name ?? null,
+      };
+    });
+    return textResult({
+      ok: true,
+      method: "revisions.list",
+      request: body,
+      revisions,
+      pagination: data?.pagination ?? null,
+    });
+  } catch (err) {
+    return textResult({ error: `revisions.list failed: ${errorMessage(err)}` });
+  }
+}
+
+/**
+ * Best-effort changelog write for outline_doc_update.
+ *
+ * After a successful `documents.update`, look up the latest revision for the
+ * given documentId and write `changelog` into its `name` field via
+ * `revisions.update`. Both sub-calls are wrapped in try/catch — any failure
+ * is returned as a string instead of thrown, so the caller can surface it
+ * via the response `warnings` array without failing the main update.
+ *
+ * Returns `{ok: true}` on success or `{warning: string}` on failure.
+ */
+async function writeChangelog(
+  documentId: string,
+  changelog: string,
+  cfg: OutlineWikiConfig,
+): Promise<{ ok: true } | { warning: string }> {
+  let listed: any;
+  try {
+    listed = await outlineFetch(cfg, "revisions.list", {
+      documentId,
+      limit: 1,
+      direction: "DESC",
+    });
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.list failed: ${errorMessage(err)}`,
+    };
+  }
+  const latest = listed?.data?.[0];
+  if (!latest || typeof latest.id !== "string") {
+    return {
+      warning:
+        "changelog write skipped: revisions.list returned no revisions for the updated document.",
+    };
+  }
+  try {
+    await outlineFetch(cfg, "revisions.update", {
+      id: latest.id,
+      name: changelog,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.update failed for revision ${latest.id}: ${errorMessage(err)}`,
+    };
+  }
+}
+
 /**
  * POST a JSON envelope to the Outline REST API. Throws on non-2xx with the
  * response body included (truncated) so the agent sees a useful error.
@@ -1055,7 +1202,7 @@ function requireConfig(cfg: OutlineWikiConfig) {
   if (!cfg.apiToken || !cfg.endpoint) {
     return textResult({
       error:
-        "Outline Wiki plugin is not configured. Set `apiToken` (Bearer) and `endpoint` (e.g. https://wiki.dev.cereb.ai/api) under `plugins.entries.outline-wiki-openclaw-plugin.config` in openclaw.json.",
+        "Outline Wiki plugin is not configured. Set `apiToken` (Bearer) and `endpoint` (e.g. https://your-outline.example.com/api) under `plugins.entries.outline-wiki-openclaw-plugin.config` in openclaw.json.",
     });
   }
   return null;

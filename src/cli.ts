@@ -296,7 +296,7 @@ function printUsage() {
     "",
     "Env (same as OpenClaw plugin):",
     "  OUTLINE_API_TOKEN    Bearer token (required)",
-    "  OUTLINE_ENDPOINT     API endpoint, e.g. https://wiki.dev.cereb.ai/api (required)",
+    "  OUTLINE_ENDPOINT     API endpoint, e.g. https://your-outline.example.com/api (required)",
     "",
     "Exit codes: 0=ok, 2=parse, 3=dispatch, 4=shape, 5=biz error",
   ].join("\n"));

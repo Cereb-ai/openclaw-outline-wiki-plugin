@@ -217,21 +217,21 @@ outline-tool attachment.upload '{"name":"x.png","url":"https://...","preset":"do
 
 如果调用返:
 ```
-"Outline Wiki plugin is not configured. Set `apiToken` (Bearer) and `endpoint` (e.g. https://wiki.dev.cereb.ai/api) under `plugins.entries.outline-wiki-openclaw-plugin.config` in openclaw.json."
+"Outline Wiki plugin is not configured. Set `apiToken` (Bearer) and `endpoint` (e.g. https://your-outline.example.com/api) under `plugins.entries.outline-wiki-openclaw-plugin.config` in openclaw.json."
 ```
 
 说明 `~/.openclaw/openclaw.json` 的 `config` 段没配. 必填 2 个字段:
 ```json
 {
   "apiToken": "ol_...",
-  "endpoint": "https://wiki.dev.cereb.ai/api"
+  "endpoint": "https://your-outline.example.com/api"
 }
 ```
 
 可选 2 个字段 (有默认值, 不配也能 work):
 ```json
 {
-  "mcpEndpoint": "https://wiki.dev.cereb.ai/mcp",        // 默认同 endpoint host
+  "mcpEndpoint": "https://your-outline.example.com/mcp",        // 默认同 endpoint host
   "defaultCollectionId": "2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba"  // 常用 WTO
 }
 ```

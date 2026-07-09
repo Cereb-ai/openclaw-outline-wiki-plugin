@@ -198,7 +198,7 @@ doc.create 不传 `collectionId` 时 fallback 到 `cfg.defaultCollectionId`（�
 ```json
 {
   "error": "doc.update does not accept `parentDocumentId` — the outline server silently drops it. To reparent a document, use `doc.move` with the same collection and the new `parentDocumentId`. Example: doc.move {id, collectionId, parentDocumentId: '<new-parent-uuid>'}.",
-  "hint": "Verified 2026-06-08 against wiki.dev.cereb.ai: documents.update ignores parentDocumentId, documents.move honors it. See README 踩坑清单 12 and SKILL.md 避坑清单 15."
+  "hint": "documents.update's schema does not include parentDocumentId — outline server silently drops it (silent drop verified 2026-06-08). To reparent, use `doc.move` with the new `collectionId` and `parentDocumentId`. See README 踩坑清单 12 and SKILL.md 避坑清单 15."
 }
 ```
 
@@ -261,8 +261,8 @@ token 注入（**dev 模式临时，明文写**）：
         "enabled": true,
         "config": {
           "apiToken": "<Bearer token>",
-          "endpoint": "https://wiki.dev.cereb.ai/api",
-          "mcpEndpoint": "https://wiki.dev.cereb.ai/mcp",
+          "endpoint": "https://your-outline.example.com/api",
+          "mcpEndpoint": "https://your-outline.example.com/mcp",
           "defaultCollectionId": "2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba"
         }
       }
@@ -319,7 +319,7 @@ token 注入（**dev 模式临时，明文写**）：
 
 ## 🔍 验证场景参考
 
-- **dev API**：`https://wiki.dev.cereb.ai/api`
+- **example API**：`https://your-outline.example.com/api`
 - **常用 collectionId**：
   - WTO: `2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba`
   - SSSS: `cad29122-ff32-4b03-88cb-f7a8a15c744d`

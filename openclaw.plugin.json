@@ -15,11 +15,11 @@
       },
       "endpoint": {
         "type": "string",
-        "description": "Outline API base URL, e.g. https://wiki.dev.cereb.ai/api"
+        "description": "Outline API base URL, e.g. https://your-outline.example.com/api"
       },
       "mcpEndpoint": {
         "type": "string",
-        "description": "Outline MCP endpoint for S3 pre-signed attachment uploads, e.g. https://wiki.dev.cereb.ai/mcp"
+        "description": "Outline MCP endpoint for S3 pre-signed attachment uploads, e.g. https://your-outline.example.com/mcp"
       },
       "defaultCollectionId": {
         "type": "string",
