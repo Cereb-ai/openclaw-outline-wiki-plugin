@@ -306,6 +306,81 @@ export default defineToolPlugin({
       },
     }),
     tool({
+      name: "outline_collection_create",
+      label: "Outline Create Collection",
+      description:
+        "Create a new outline collection. Required: `name` (string, non-empty). Optional: `description` (string), `icon` (string), `color` (hex string, e.g. `#000000`), `permission` (default `read_write` — overrides outline server's `null` default which would make the collection admin-only and cause 'all users cannot see this collection' incidents), `sharing` (bool, default `true`). Calls `collections.create`.",
+      parameters: Type.Object({
+        name: Type.String({ description: "Collection name (required, non-empty)." }),
+        description: Type.Optional(
+          Type.String({ description: "Human-readable collection description." }),
+        ),
+        icon: Type.Optional(
+          Type.String({ description: "Outline icon identifier (string, e.g. emoji name)." }),
+        ),
+        color: Type.Optional(
+          Type.String({
+            description: "Hex color string, e.g. `#000000`.",
+            pattern: "^#?[0-9A-Fa-f]{6}$",
+          }),
+        ),
+        permission: Type.Optional(
+          Type.String({
+            description:
+              "Default collection permission. Defaults to `read_write` (NOT `null` — passing null/omitting on outline's REST endpoint makes the collection admin-only and is the root cause of 'I created a collection but nobody can see it' incidents). Pass a different value to override.",
+            default: "read_write",
+            enum: ["read_write", "read", "null"],
+          }),
+        ),
+        sharing: Type.Optional(
+          Type.Boolean({
+            description: "Whether the collection can be shared externally. Default `true`.",
+            default: true,
+          }),
+        ),
+      }),
+      async execute(args, cfg) {
+        return await collectionCreate(args, cfg as OutlineWikiConfig);
+      },
+    }),
+    tool({
+      name: "outline_collection_update",
+      label: "Outline Update Collection",
+      description:
+        "Update an existing outline collection. Required: `id` (collection UUID). Optional: `name`, `description`, `icon`, `color`, `permission`, `sharing` — pass only the fields you want to change. Calls `collections.update`.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Collection UUID (required)." }),
+        name: Type.Optional(
+          Type.String({ description: "New collection name." }),
+        ),
+        description: Type.Optional(
+          Type.String({ description: "New description." }),
+        ),
+        icon: Type.Optional(
+          Type.String({ description: "New icon identifier." }),
+        ),
+        color: Type.Optional(
+          Type.String({
+            description: "New hex color string, e.g. `#000000`.",
+            pattern: "^#?[0-9A-Fa-f]{6}$",
+          }),
+        ),
+        permission: Type.Optional(
+          Type.String({
+            description:
+              "New permission. Use to flip an accidentally-admin-only collection back to `read_write` so all users can see it.",
+            enum: ["read_write", "read", "null"],
+          }),
+        ),
+        sharing: Type.Optional(
+          Type.Boolean({ description: "New sharing flag." }),
+        ),
+      }),
+      async execute(args, cfg) {
+        return await collectionUpdate(args, cfg as OutlineWikiConfig);
+      },
+    }),
+    tool({
       name: "outline_rev_log",
       label: "Outline Revision Log",
       description:
@@ -1057,6 +1132,130 @@ async function collectionDocuments(
     });
   } catch (err) {
     return textResult({ error: `collections.documents failed: ${errorMessage(err)}` });
+  }
+}
+
+async function collectionCreate(
+  args: Record<string, unknown>,
+  cfg: OutlineWikiConfig,
+) {
+  const guard = requireConfig(cfg);
+  if (guard) return guard;
+  if (typeof args.name !== "string" || args.name.length === 0) {
+    return textResult({
+      error:
+        "outline_collection_create requires a non-empty `name` (string) argument.",
+    });
+  }
+
+  // Build the request body. `permission` defaults to "read_write" rather than
+  // letting outline's REST endpoint default to `null` (admin-only). The
+  // TypeBox schema also declares `default: "read_write"` so OpenClaw-level
+  // validation fills it in, but we re-default defensively here in case the
+  // schema is bypassed (e.g. via the CLI).
+  const body: Record<string, unknown> = { name: args.name };
+  if (typeof args.description === "string" && args.description.length > 0) {
+    body.description = args.description;
+  }
+  if (typeof args.icon === "string" && args.icon.length > 0) {
+    body.icon = args.icon;
+  }
+  if (typeof args.color === "string" && args.color.length > 0) {
+    body.color = args.color;
+  }
+  if (typeof args.permission === "string" && args.permission.length > 0) {
+    body.permission = args.permission;
+  } else {
+    body.permission = "read_write";
+  }
+  if (typeof args.sharing === "boolean") {
+    body.sharing = args.sharing;
+  } else {
+    body.sharing = true;
+  }
+
+  try {
+    const data = await outlineFetch(cfg, "collections.create", body);
+    const created = data?.data ?? null;
+    return textResult({
+      ok: true,
+      method: "collections.create",
+      request: body,
+      collection: created,
+      summary: created
+        ? {
+            id: created.id,
+            name: created.name,
+            url: created.url ?? null,
+            urlId: created.urlId ?? null,
+            permission: created.permission ?? null,
+          }
+        : null,
+    });
+  } catch (err) {
+    return textResult({ error: `collections.create failed: ${errorMessage(err)}` });
+  }
+}
+
+async function collectionUpdate(
+  args: Record<string, unknown>,
+  cfg: OutlineWikiConfig,
+) {
+  const guard = requireConfig(cfg);
+  if (guard) return guard;
+  if (typeof args.id !== "string" || args.id.length === 0) {
+    return textResult({
+      error:
+        "outline_collection_update requires a non-empty `id` (string) argument (collection UUID).",
+    });
+  }
+
+  // At least one mutable field must be present; otherwise the call is a
+  // no-op and we want to fail loudly.
+  const mutable: Array<keyof typeof args> = [
+    "name",
+    "description",
+    "icon",
+    "color",
+    "permission",
+    "sharing",
+  ];
+  const hasAny = mutable.some(
+    (k) => typeof (args as Record<string, unknown>)[k] !== "undefined",
+  );
+  if (!hasAny) {
+    return textResult({
+      error:
+        "outline_collection_update requires at least one of `name`, `description`, `icon`, `color`, `permission`, `sharing`.",
+    });
+  }
+
+  const body: Record<string, unknown> = { id: args.id };
+  for (const k of mutable) {
+    const v = (args as Record<string, unknown>)[k];
+    if (typeof v !== "undefined") body[k] = v;
+  }
+
+  try {
+    const data = await outlineFetch(cfg, "collections.update", body);
+    const updated = data?.data ?? null;
+    return textResult({
+      ok: true,
+      method: "collections.update",
+      request: body,
+      collection: updated,
+      summary: updated
+        ? {
+            id: updated.id,
+            name: updated.name,
+            url: updated.url ?? null,
+            urlId: updated.urlId ?? null,
+            permission: updated.permission ?? null,
+          }
+        : null,
+    });
+  } catch (err) {
+    return textResult({ error: `collections.update failed: ${errorMessage(err)}` });
   }
 }
 

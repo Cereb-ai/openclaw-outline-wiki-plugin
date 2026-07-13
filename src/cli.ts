@@ -3,7 +3,7 @@
 /**
  * outline-tool — CLI wrapper for the @cereb/outline-wiki-openclaw-plugin.
  *
- * Allows the 12+ plugin methods to be invoked from any shell / terminal,
+ * Allows the 14+ plugin methods to be invoked from any shell / terminal,
  * independently of OpenClaw / OpenCode / Wecom DM.
  *
  * Reuses the same raw outlineFetch/auth config as the OpenClaw entry point.
@@ -18,6 +18,8 @@
  *   outline-tool doc.get '{"id":"..."}'
  *   outline-tool search.query '{"query":"redis sentinel"}'
  *   outline-tool collection.list '{}'
+ *   outline-tool collection.create '{"name":"Incidents"}'
+ *   outline-tool collection.update '{"id":"...","permission":"read_write"}'
  *   outline-tool attachment.upload '{"name":"x.png","url":"https://...","preset":"documentAttachment"}'
  *
  * Output: JSON to stdout on success; non-zero exit on failure.
@@ -217,6 +219,46 @@ async function dispatchCollection(
     const body = { id: args.id, limit: args.limit ?? 25, offset: args.offset ?? 0 };
     const data = await outlineFetch(cfg, "collections.documents", body);
     return textResult({ ok: true, method: "collections.documents", documents: data?.data ?? [], pagination: data?.pagination ?? null });
+  }
+  if (method === "create") {
+    if (typeof args.name !== "string" || args.name.length === 0) {
+      return textResult({ error: "collection.create requires a non-empty `name` (string)" });
+    }
+    const body: Record<string, unknown> = { name: args.name };
+    if (typeof args.description === "string" && args.description.length > 0) body.description = args.description;
+    if (typeof args.icon === "string" && args.icon.length > 0) body.icon = args.icon;
+    if (typeof args.color === "string" && args.color.length > 0) body.color = args.color;
+    // permission default = "read_write" (not null — that would make the
+    // collection admin-only and is the root cause of "I created a collection
+    // but nobody can see it" incidents).
+    if (typeof args.permission === "string" && args.permission.length > 0) {
+      body.permission = args.permission;
+    } else {
+      body.permission = "read_write";
+    }
+    if (typeof args.sharing === "boolean") {
+      body.sharing = args.sharing;
+    } else {
+      body.sharing = true;
+    }
+    const data = await outlineFetch(cfg, "collections.create", body);
+    return textResult({ ok: true, method: "collections.create", collection: data?.data ?? null });
+  }
+  if (method === "update") {
+    if (typeof args.id !== "string" || args.id.length === 0) {
+      return textResult({ error: "collection.update requires a non-empty `id` (string)" });
+    }
+    const mutable = ["name", "description", "icon", "color", "permission", "sharing"];
+    const hasAny = mutable.some((k) => typeof args[k] !== "undefined");
+    if (!hasAny) {
+      return textResult({ error: "collection.update requires at least one of " + mutable.join(", ") });
+    }
+    const body: Record<string, unknown> = { id: args.id };
+    for (const k of mutable) {
+      if (typeof args[k] !== "undefined") body[k] = args[k];
+    }
+    const data = await outlineFetch(cfg, "collections.update", body);
+    return textResult({ ok: true, method: "collections.update", collection: data?.data ?? null });
   }
   return textResult({ error: `Unknown collection method: ${method}` });
 }

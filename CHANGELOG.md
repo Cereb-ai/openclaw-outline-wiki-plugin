@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Open-source release: added `LICENSE` (MIT), `CONTRIBUTING.md`, `CHANGELOG.md`. Updated `package.json` metadata (license, author, repository, bugs, homepage) and removed `private: true`. Replaced internal host placeholder (`wiki.dev.cereb.ai` → RFC 2606 example.com). Removed build artifacts from git tracking (`dist/` now gitignored; rebuilt on demand via `npm run build`).
 
+## [0.5.0] - 2026-07-13
+
+### Added
+- New tool `outline_collection_create` (`collections.create` REST). Required: `name`. Optional: `description`, `icon`, `color`, `sharing` (bool, default `true`). New tool `outline_collection_update` (`collections.update` REST). Required: `id`. Optional: `name`, `description`, `icon`, `color`, `permission`, `sharing`. Both tools are also exposed via the standalone CLI as `outline-tool collection.create` / `outline-tool collection.update`.
+
+### Changed
+- `outline_collection_create` defaults `permission` to `"read_write"` (not `null`). Outline's REST endpoint returns `permission: null` when the field is omitted, which makes the resulting collection admin-only and is the root cause of "I created a collection but nobody can see it" incidents. The TypeBox schema declares `default: "read_write"` and the handler re-defaults defensively for the CLI path.
+
 ## [0.4.0] - 2026-06-28
 
 ### Changed
@@ -38,5 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial implementation: read-only methods (`documents.list`, `documents.info`, `collections.list`) over the legacy single-dispatcher shape.
 
-[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/releases/tag/v0.4.0
