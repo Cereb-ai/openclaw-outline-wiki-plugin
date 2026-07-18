@@ -164,7 +164,7 @@ export default defineToolPlugin({
       name: "outline_doc_update",
       label: "Outline Update Document",
       description:
-        "Update an existing document's `text` and/or `title` (`editMode=replace` default). Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — the outline server silently drops it (verified 2026-06-08). To reparent, use `outline_doc_move`. Optional: `publish` (bool), `changelog` (string — after a successful update the plugin best-effort writes this string into the latest revision's `name` field via `revisions.update`; failures are logged in the response `warnings` array but do not fail the main update).",
+        "Update an existing document's `text` and/or `title` (`editMode=replace` default). Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — use `outline_doc_move` for reparent. Optional: `publish` (bool), `changelog` (string — after a successful update the plugin best-effort writes this string into the latest revision's `name` field via `revisions.update`; failures are logged in the response `warnings` array but do not fail the main update), `strictChangelog` (bool, default false — when true, changelog write failure hard-fails the update response).",
       parameters: Type.Object({
         id: Type.String({ description: "Outline document UUID." }),
         title: Type.Optional(Type.String({ description: "New title." })),
@@ -185,6 +185,13 @@ export default defineToolPlugin({
           Type.String({
             description:
               "Optional human-readable summary written to the latest revision's `name` field via `revisions.update` after a successful update. Best-effort: failures are non-fatal and surfaced in the response's `warnings`.",
+          }),
+        ),
+        strictChangelog: Type.Optional(
+          Type.Boolean({
+            description:
+              "When true, a changelog write failure returns an error instead of ok:true. Default false preserves best-effort behavior.",
+            default: false,
           }),
         ),
       }),
@@ -638,11 +645,11 @@ async function docUpdate(
   // NOT a parameter on this tool, so OpenClaw will refuse the call before
   // it reaches here. The runtime check is a defense-in-depth backstop in
   // case the schema is loosened in the future.
-  if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
+  if (args.parentDocumentId !== undefined) {
     return textResult({
       error:
         "outline_doc_update does not accept `parentDocumentId` — the outline server silently drops it. " +
-        "To reparent a document, use `outline_doc_move` with the new `collectionId` (same collection is fine) and the new `parentDocumentId`. " +
+        "To reparent a document, use outline_doc_move for reparent with the new `collectionId` (same collection is fine) and the new `parentDocumentId`. " +
         "Example: outline_doc_move {id, collectionId, parentDocumentId: '<new-parent-uuid>'}.",
       hint:
         "documents.update's schema does not include parentDocumentId — outline server silently drops it (silent drop verified 2026-06-08). " +
@@ -698,6 +705,14 @@ async function docUpdate(
     if (typeof args.changelog === "string" && args.changelog.length > 0) {
       const changelogResult = await writeChangelog(args.id, args.changelog, cfg);
       if ("warning" in changelogResult) {
+        if (args.strictChangelog === true) {
+          return textResult({
+            error: `documents.update changelog write failed with strictChangelog=true: ${changelogResult.warning}`,
+            method: "documents.update",
+            request: body,
+            document: updated,
+          });
+        }
         warnings.push(changelogResult.warning);
       }
     }
@@ -1037,7 +1052,7 @@ async function attachmentUpload(
   // plugin will always 401/403. We detect the legacy URL up front and
   // surface a clear hint so callers know to switch to url mode or the
   // outline web UI instead of seeing a confusing S3 / 401 / 403 trace.
-  if (uploadUrl.startsWith("/api/files.create")) {
+  if (isLegacyFilesCreateUploadUrl(uploadUrl)) {
     return textResult({
       error:
         "dev wiki is using the legacy files.create endpoint which requires a browser session cookie. " +
@@ -1105,6 +1120,15 @@ async function attachmentUpload(
         }
       : null,
   });
+}
+
+function isLegacyFilesCreateUploadUrl(uploadUrl: string): boolean {
+  if (uploadUrl.startsWith("/api/files.create")) return true;
+  try {
+    return new URL(uploadUrl).pathname === "/api/files.create";
+  } catch {
+    return false;
+  }
 }
 
 async function collectionList(

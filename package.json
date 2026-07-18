@@ -2,7 +2,7 @@
   "name": "@cereb/outline-wiki-openclaw-plugin",
   "version": "0.5.1",
   "type": "module",
-  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.1: outline_doc_create response validation fix)",
+  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.1: doc create validation plus CP-586 A2-A5 hardening)",
   "license": "MIT",
   "author": {
     "name": "Leo Wang",
