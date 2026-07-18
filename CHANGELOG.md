@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-18
+
+### Fixed
+- `outline_doc_create` now treats `documents.create` responses without a non-empty `data.id` as an error instead of returning `ok:true`, and verifies the created document with `documents.info` before reporting success.
+- `outline_doc_update` now rejects any provided `parentDocumentId` at the handler before calling `documents.update`; use `outline_doc_move` for reparent.
+- `outline_attachment_upload` path mode now aborts on legacy `files.create` upload URLs before any S3 upload attempt and points callers to `url` mode.
+
 ### Changed
+- `outline_doc_update` now accepts optional `strictChangelog`; default/false preserves best-effort changelog warnings, while true hard-fails the response if the changelog write fails.
+- A3 investigation: source confirms `outline_doc_get` calls `documents.info`. On 2026-07-18, a temporary 8,279-byte long document returned equal text via plugin path and raw REST `documents.info` (8,159 bytes each), so no `documents.export.md` fallback was added.
 - Open-source release: added `LICENSE` (MIT), `CONTRIBUTING.md`, `CHANGELOG.md`. Updated `package.json` metadata (license, author, repository, bugs, homepage) and removed `private: true`. Replaced internal host placeholder (`wiki.dev.cereb.ai` → RFC 2606 example.com). Removed build artifacts from git tracking (`dist/` now gitignored; rebuilt on demand via `npm run build`).
 
 ## [0.5.0] - 2026-07-13
@@ -46,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial implementation: read-only methods (`documents.list`, `documents.info`, `collections.list`) over the legacy single-dispatcher shape.
 
-[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/releases/tag/v0.4.0
