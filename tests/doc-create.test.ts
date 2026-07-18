@@ -26,6 +26,13 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+function emptyResponse(): Response {
+  return new Response("", {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 async function executeDocCreate() {
   const tool = getDocCreateTool();
   return await tool.execute(
@@ -48,11 +55,12 @@ describe("outline_doc_create response validation", () => {
   });
 
   test.each([
-    ["empty object", {}],
-    ["null data", { data: null }],
-    ["missing id", { data: { title: "Created from test" } }],
-  ])("returns an error when documents.create returns %s", async (_label, body) => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(body)));
+    ["empty body", emptyResponse()],
+    ["empty object", jsonResponse({})],
+    ["null data", jsonResponse({ data: null })],
+    ["missing id", jsonResponse({ data: { title: "Created from test" } })],
+  ])("returns an error when documents.create returns %s", async (_label, response) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
 
     const result = await executeDocCreate();
 

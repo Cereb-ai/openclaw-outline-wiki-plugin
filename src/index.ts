@@ -34,6 +34,8 @@ import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 
 const PLUGIN_ID = "outline-wiki-openclaw-plugin";
+const EMPTY_CREATE_RESPONSE_ERROR =
+  "documents.create returned empty data — server may have failed silently";
 // Lower-case camelCase to mirror outline server-side AttachmentPreset enum
 // (see outline repo shared/types.ts:134). YAGNI: only documentAttachment /
 // avatar / emoji are useful for pilot; workspaceImport / import are admin
@@ -561,6 +563,21 @@ async function docCreate(
   try {
     const data = await outlineFetch(cfg, "documents.create", body);
     const created = data?.data ?? null;
+    const createdId = created?.id;
+    if (typeof createdId !== "string" || createdId.length === 0) {
+      return textResult({
+        error: EMPTY_CREATE_RESPONSE_ERROR,
+      });
+    }
+
+    try {
+      await verifyCreatedDocument(cfg, createdId);
+    } catch (err) {
+      return textResult({
+        error: `documents.create verify failed for id "${createdId}": ${errorMessage(err)}`,
+      });
+    }
+
     return textResult({
       ok: true,
       method: "documents.create",
@@ -580,7 +597,21 @@ async function docCreate(
         : null,
     });
   } catch (err) {
+    if (errorMessage(err).startsWith("Response was not JSON (HTTP 200):")) {
+      return textResult({ error: EMPTY_CREATE_RESPONSE_ERROR });
+    }
     return textResult({ error: `documents.create failed: ${errorMessage(err)}` });
+  }
+}
+
+async function verifyCreatedDocument(
+  cfg: OutlineWikiConfig,
+  id: string,
+): Promise<void> {
+  const info = await outlineFetch(cfg, "documents.info", { id });
+  const verifiedId = info?.data?.id;
+  if (typeof verifiedId !== "string" || verifiedId.length === 0) {
+    throw new Error("documents.info returned empty data");
   }
 }
 

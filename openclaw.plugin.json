@@ -2,7 +2,7 @@
   "id": "outline-wiki-openclaw-plugin",
   "name": "Outline Wiki",
   "description": "Native Outline Wiki knowledge-base integration for OpenClaw. 14 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents,create,update}, outline_attachment_upload, outline_rev_log. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15). `outline_collection_create` defaults `permission` to `read_write` (not `null`) so new collections are visible to all users instead of admin-only.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "skills": [
     "./skills"
   ],
