@@ -1,9 +1,9 @@
 ---
 name: outline-wiki
 description: OpenClaw outline-wiki 知识库原生插件. 提供两条调用路径:
-  1) OpenClaw 原生 tools: 13 个独立 named tool (`outline_doc_*` / `outline_search_query` / `outline_collection_*` / `outline_attachment_upload` / `outline_rev_log`)
-  2) 独立 CLI `outline-tool` (OpenCode / 任意 shell, 不依赖 OpenClaw, 走 category.method 字符串)
-  13 个 method, 5 个 category: doc / search / collection / attachment / revision. 当用户说"找 outline 上 XXX 文档"、"读一下 wiki 上的 XXX"、"在 outline 上写一篇 XXX"、"改一下 outline 上 XXX 文档"、"删一下 outline 上的 XXX"、"归档 XXX"、"在 outline 上传一张图片"、"看 outline 文档的修改记录"时触发.
+  1) OpenClaw 原生 tools: 15 个独立 named tool (`outline_doc_*` / `outline_search_query` / `outline_collection_*` / `outline_attachment_upload` / `outline_rev_log`)
+  2) 独立 CLI `outline-tool` (非 OpenClaw 原生 agent 如 codex / 任意 shell, 不依赖 OpenClaw, 方法名与 MCP 100% 对齐: `outline_*` 全名或短 category.method 均可用)
+  15 个 method, 4 个 category: doc / search / collection / attachment. 当用户说"找 outline 上 XXX 文档"、"读一下 wiki 上的 XXX"、"在 outline 上写一篇 XXX"、"改一下 outline 上 XXX 文档"、"删一下 outline 上的 XXX"、"归档 XXX"、"在 outline 上传一张图片"、"看 outline 文档的修改记录"时触发.
 metadata:
   {
     "openclaw": { "emoji": "📚" },
@@ -14,18 +14,18 @@ metadata:
 
 > 本插件提供两条 Outline 调用路径:
 >
-> - **OpenClaw 原生路径**: agent 调 13 个 named tool, 通过 `@cereb/outline-wiki-openclaw-plugin` 暴露.
-> - **CLI 工具路径**: 终端 / OpenCode 等子 agent 调 `outline-tool` 二进制 (不依赖 OpenClaw, 共享同一份 handler 代码).
+> - **OpenClaw 原生路径 (路径 A)**: OpenClaw 原生 agent 调 15 个 named tool, 通过 `@cereb/outline-wiki-openclaw-plugin` 暴露.
+> - **CLI 工具路径 (路径 B)**: 非 OpenClaw 原生 agent (codex 等, 无 MCP 工具暴露) / 终端 / CI 调 `outline-tool` 二进制 (不依赖 OpenClaw, 共享同一份 handler 代码).
 >
-> 两者功能完全相同, 走哪条取决于调用方上下文.
+> 两者功能完全相同, 走哪条取决于调用方上下文. 方法名 100% 对齐.
 
 ---
 
 ## 调用形态
 
-### 1) OpenClaw 原生 named tools (agent 默认)
+### 1) OpenClaw 原生 named tools (路径 A, agent 默认)
 
-每个 method 是一个独立的 named tool, 参数直接是 method 的 args (flat object). 13 个 tool 列表见下表.
+每个 method 是一个独立的 named tool, 参数直接是 method 的 args (flat object). 15 个 tool 列表见下表.
 
 **例**:
 ```
@@ -39,22 +39,31 @@ outline_attachment_upload { name: "x.png", url: "<public-url>", documentId: "<do
 outline_rev_log { documentId: "<doc-uuid>", limit: 5 }
 ```
 
-### 2) CLI 二进制 (OpenCode / 终端 / CI 使用, 不依赖 OpenClaw)
+### 2) CLI 二进制 (路径 B — 非 OpenClaw 原生 agent 如 codex / 终端 / CI)
 
-CLI 走 `category.method` 字符串 envelope (保留旧形态, 因为 CLI 不接 OpenClaw 工具系统):
+**方法名与 MCP 100% 对齐**: `outline_*` 全名 (MCP 名) 或短 `category.method` 都接受, 参数与 MCP 工具完全一致:
 ```bash
+outline-tool outline_doc_list '{"limit":2}'
+outline-tool outline_doc_get '{"id":"..."}'
+outline-tool outline_search_query '{"query":"redis sentinel"}'
+outline-tool outline_rev_log '{"documentId":"...","limit":5}'
+outline-tool outline_attachment_upload '{"name":"x.png","url":"https://...","preset":"documentAttachment"}'
+# 短名同样可用 (向后兼容):
 outline-tool doc.list '{"limit":2}'
 outline-tool doc.get '{"id":"..."}'
 outline-tool search.query '{"query":"redis sentinel"}'
-outline-tool collection.list '{}'
+outline-tool doc.rev_log '{"documentId":"...","limit":5}'
 outline-tool attachment.upload '{"name":"x.png","url":"https://...","preset":"documentAttachment"}'
-outline-tool rev.log '{"documentId":"..."}'
+# --help 打印方法列表
+outline-tool --help
 ```
 退出码: `0`=ok, `2`=JSON 解析错, `3`=dispatch 错, `4`=shape 错, `5`=业务错误.
 
+> ⚠️ 方法名必须用 MCP 名 (`outline_*`) 或短名 (`category.method`), 两者都能直接调用. CLI 只有 15 个方法, 与 MCP 工具一一对应.
+
 ---
 
-## 13 个 named tool 速查
+## 15 个 named tool 速查
 
 | Tool 名 | Outline method | 用途 | 必填参数 | 常用选填 |
 |---|---|---|---|---|
@@ -69,6 +78,8 @@ outline-tool rev.log '{"documentId":"..."}'
 | `outline_search_query` | `documents.search` | 全文搜索文档 | `query` | `limit`, `offset`, `collectionId` |
 | `outline_collection_list` | `collections.list` | 列所有 collection | — | `limit`, `offset` |
 | `outline_collection_documents` | `collections.documents` | 列 collection 下文档 (含 children 结构) | `id` (collection id) | `limit`, `offset` |
+| `outline_collection_create` | `collections.create` | 新建 collection (permission 默认 `read_write`, sharing 默认 true) | `name` | `description`, `icon`, `color`, `permission`, `sharing` |
+| `outline_collection_update` | `collections.update` | 改 collection 字段 | `id` + (name/description/icon/color/permission/sharing 至少一项) | — |
 | `outline_attachment_upload` | `attachments.create` / `attachments.createFromUrl` | URL 模式 (server-side fetch) / 本地文件模式 (S3 预签 POST) | `name` + (`url` 或 `path`) | `contentType`, `size`, `documentId`, `preset` |
 | `outline_rev_log` | `revisions.list` | 文档修改记录 (name / timestamp / author, 不含正文) | `documentId` | `limit` (default 5, max 20) |
 

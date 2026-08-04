@@ -85,7 +85,7 @@ export default defineToolPlugin({
   id: PLUGIN_ID,
   name: "Outline Wiki",
   description:
-    "Native Outline Wiki knowledge-base integration for OpenClaw. 13 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents}, outline_rev_log, outline_attachment_upload. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15), and accepts an optional `changelog` string that is written to the latest revision's `name` field (best-effort, non-fatal).",
+    "Native Outline Wiki knowledge-base integration for OpenClaw. 15 named tools (one per outline category.method) replace the 0.3.x single-dispatcher `outline_wiki` tool: outline_doc_{list,get,create,update,delete,archive,restore,move}, outline_search_query, outline_collection_{list,documents,create,update}, outline_rev_log, outline_attachment_upload. Two invocation paths: native OpenClaw agents call these MCP tools directly; non-native agents (e.g. codex) use the outline-tool binary with the SAME method names (outline_* or short category.method) — see skills/outline-wiki/SKILL.md. `outline_doc_create` / `outline_doc_move` accept optional `parentDocumentId`. `outline_doc_update` rejects `parentDocumentId` with a fail-fast error (use `outline_doc_move` to reparent — see SKILL.md 避坑清单 15), and accepts an optional `changelog` string that is written to the latest revision's `name` field (best-effort, non-fatal).",
   configSchema,
   activation: { onStartup: true },
   tools: (tool) => [

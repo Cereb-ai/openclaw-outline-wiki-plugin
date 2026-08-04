@@ -3,23 +3,35 @@
 /**
  * outline-tool — CLI wrapper for the @cereb/outline-wiki-openclaw-plugin.
  *
- * Allows the 14+ plugin methods to be invoked from any shell / terminal,
+ * Allows all 15 plugin methods to be invoked from any shell / terminal,
  * independently of OpenClaw / OpenCode / Wecom DM.
  *
  * Reuses the same raw outlineFetch/auth config as the OpenClaw entry point.
  * Reads env (OUTLINE_API_TOKEN / OUTLINE_ENDPOINT / OUTLINE_DEFAULT_COLLECTION_ID)
  * the same way as the plugin.
  *
- * Usage:
- *   outline-tool <category>.<method> '<args-json>'
+ * Method names are 100% aligned with the OpenClaw MCP tools: both the MCP
+ * names (outline_doc_list / outline_search_query / ...) and the short
+ * category.method names (doc.list / search.query / ...) are accepted.
  *
- * Examples:
+ * Usage:
+ *   outline-tool <method> '<args-json>'
+ *
+ * Examples (MCP names):
+ *   outline-tool outline_doc_list '{"limit":2}'
+ *   outline-tool outline_doc_get '{"id":"..."}'
+ *   outline-tool outline_search_query '{"query":"redis sentinel"}'
+ *   outline-tool outline_collection_list '{}'
+ *   outline-tool outline_collection_create '{"name":"Incidents"}'
+ *   outline-tool outline_collection_update '{"id":"...","permission":"read_write"}'
+ *   outline-tool outline_rev_log '{"documentId":"...","limit":5}'
+ *   outline-tool outline_attachment_upload '{"name":"x.png","url":"https://...","preset":"documentAttachment","documentId":"..."}'
+ *   outline-tool outline_attachment_upload '{"name":"x.png","path":"/tmp/x.png"}'
+ *
+ * Examples (short category.method names, backward compat):
  *   outline-tool doc.list '{"limit":2}'
  *   outline-tool doc.get '{"id":"..."}'
  *   outline-tool search.query '{"query":"redis sentinel"}'
- *   outline-tool collection.list '{}'
- *   outline-tool collection.create '{"name":"Incidents"}'
- *   outline-tool collection.update '{"id":"...","permission":"read_write"}'
  *   outline-tool attachment.upload '{"name":"x.png","url":"https://...","preset":"documentAttachment"}'
  *
  * Output: JSON to stdout on success; non-zero exit on failure.
@@ -29,6 +41,28 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { readFile } from "node:fs/promises";
+
+// 100% parity with the OpenClaw native MCP tool names (outline_*).
+const MCP_ALIASES: Record<string, string> = {
+  outline_doc_list: "doc.list",
+  outline_doc_get: "doc.get",
+  outline_doc_create: "doc.create",
+  outline_doc_update: "doc.update",
+  outline_doc_delete: "doc.delete",
+  outline_doc_archive: "doc.archive",
+  outline_doc_restore: "doc.restore",
+  outline_doc_move: "doc.move",
+  outline_search_query: "search.query",
+  outline_collection_list: "collection.list",
+  outline_collection_documents: "collection.documents",
+  outline_collection_create: "collection.create",
+  outline_collection_update: "collection.update",
+  outline_rev_log: "doc.rev_log",
+  outline_attachment_upload: "attachment.upload",
+};
+
+const ATTACHMENT_PRESETS = ["documentAttachment", "avatar", "emoji"];
 
 function readOpenClawOutlineConfig() {
   try {
@@ -53,13 +87,21 @@ async function main() {
     printUsage();
     process.exit(1);
   }
-  const raw = argv[0]; // e.g. "doc.list" or "doc list"
+  const raw = argv[0]; // e.g. "doc.list", "doc list", or MCP name "outline_doc_list"
   const argsStr = argv.slice(1).join(" ");
 
+  if (raw === "--help" || raw === "-h" || argsStr === "--help" || argsStr === "-h") {
+    printUsage();
+    process.exit(0);
+  }
+
+  // Resolve MCP tool name (outline_doc_list) → category.method, else use as-is.
+  const target = MCP_ALIASES[raw] ?? raw;
+
   // parse "<category>.<method>" or "<category> <method>"
-  const parts = raw.split(/[. ]/);
+  const parts = target.split(/[. ]/);
   if (parts.length < 2) {
-    console.error(`outline-tool: invalid target "${raw}". Use <category>.<method> or <category> <method>.`);
+    console.error(`outline-tool: invalid target "${raw}". Use <category>.<method> or the MCP tool name (outline_doc_list etc).`);
     process.exit(2);
   }
   const category = parts[0];
@@ -143,7 +185,7 @@ async function dispatch(
   }
 }
 
-// --- doc handlers (light, mirror the plugin) ---
+// --- doc handlers (mirror the plugin) ---
 
 async function dispatchDoc(
   method: string,
@@ -199,6 +241,15 @@ async function dispatchDoc(
       if (typeof args.parentDocumentId === "string") body.parentDocumentId = args.parentDocumentId;
       const data = await outlineFetch(cfg, "documents.move", body);
       return textResult({ ok: true, method: "documents.move", ...data?.data ?? {} });
+    }
+    case "rev_log": {
+      if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+        return textResult({ error: "doc.rev_log requires a non-empty `documentId` (string) argument." });
+      }
+      const rawLimit = typeof args.limit === "number" ? args.limit : 5;
+      const limit = Math.min(20, Math.max(1, Math.trunc(rawLimit)));
+      const data = await outlineFetch(cfg, "revisions.list", { documentId: args.documentId, limit });
+      return textResult({ ok: true, method: "revisions.list", revisions: data?.data ?? [], pagination: data?.pagination ?? null });
     }
     default:
       return textResult({ error: `Unknown doc method: ${method}` });
@@ -280,15 +331,145 @@ async function dispatchAttachment(
   cfg: { apiToken: string; endpoint: string },
 ) {
   if (method !== "upload") return textResult({ error: `Unknown attachment method: ${method}` });
-  if (args.url) {
-    const body = { name: args.name, url: args.url, documentId: args.documentId, preset: args.preset ?? "documentAttachment" };
+  if (typeof args.name !== "string" || args.name.length === 0) {
+    return textResult({ error: "attachment.upload requires a non-empty `name` (string) argument." });
+  }
+  if (typeof args.url !== "string" && typeof args.path !== "string") {
+    return textResult({
+      error:
+        "attachment.upload requires either `url` (string, outline fetches it) or `path` (string, plugin reads + uploads).",
+    });
+  }
+  const presetRaw = typeof args.preset === "string" ? args.preset : "documentAttachment";
+  if (!ATTACHMENT_PRESETS.includes(presetRaw)) {
+    return textResult({ error: `attachment.upload preset must be one of: ${ATTACHMENT_PRESETS.join(", ")}.` });
+  }
+  const preset = presetRaw;
+
+  // Branch A: caller provides a URL. outline's `attachments.createFromUrl`
+  // endpoint fetches the URL server-side, attaches the resulting file to
+  // the given document, and returns the attachment record in one round-trip.
+  if (typeof args.url === "string") {
+    if (preset !== "documentAttachment") {
+      return textResult({
+        error:
+          "attachment.upload with `url` only supports preset=documentAttachment; use `path` for avatar/emoji.",
+      });
+    }
+    if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+      return textResult({
+        error:
+          "attachment.upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document.",
+      });
+    }
+    const body = { name: args.name, url: args.url, documentId: args.documentId, preset };
     const data = await outlineFetch(cfg, "attachments.createFromUrl", body);
-    return textResult({ ok: true, method: "attachments.createFromUrl", ...data?.data ?? {} });
+    const attachment = data?.data ?? null;
+    return textResult({
+      ok: true,
+      method: "attachments.createFromUrl",
+      request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+      attachment,
+      summary: attachment ? { id: attachment.id, name: args.name, url: attachment.url ?? null } : null,
+    });
   }
-  if (args.path) {
-    return textResult({ error: "path mode is not yet supported in outline-tool; use url mode or outline_wiki call" });
+
+  // Branch B: caller provides a local file path. Read the file, mint an S3
+  // presigned POST via `attachments.create` (step 1), then PUT to S3 (step 2).
+  const path = args.path as string;
+  const contentType =
+    typeof args.contentType === "string" && args.contentType.length > 0
+      ? args.contentType
+      : "application/octet-stream";
+  const documentId =
+    typeof args.documentId === "string" && args.documentId.length > 0
+      ? args.documentId
+      : undefined;
+
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(path);
+  } catch (err) {
+    return textResult({ error: `attachment.upload failed to read local file: ${(err).message}` });
   }
-  return textResult({ error: "attachment.upload requires either `url` or `path`" });
+  const size = buffer.length;
+
+  let step1: any;
+  try {
+    step1 = await outlineFetch(cfg, "attachments.create", {
+      name: args.name,
+      contentType,
+      size,
+      documentId,
+      preset,
+    });
+  } catch (err) {
+    return textResult({ error: `attachments.create (step 1) failed: ${(err).message}` });
+  }
+
+  const { uploadUrl, form, attachment } = step1?.data ?? {};
+  if (typeof uploadUrl !== "string" || !form || typeof form !== "object") {
+    return textResult({
+      error:
+        "attachments.create did not return uploadUrl/form — outline API contract changed?",
+      hint: "See outline server source: server/routes/api/attachments/attachments.ts `attachments.create` handler.",
+    });
+  }
+
+  // Legacy / pre-S3 outline servers hand back a relative `/api/files.create`
+  // URL here instead of a real S3 presigned POST. `files.create` is
+  // cookie-only auth, so a Bearer-token PUT will always 401/403. Detect the
+  // legacy URL up front and surface a clear hint.
+  if (isLegacyFilesCreateUploadUrl(uploadUrl)) {
+    return textResult({
+      error:
+        "dev wiki is using the legacy files.create endpoint which requires a browser session cookie. " +
+        "path mode is not supported on this outline instance; use `url` mode or upload via the outline web UI.",
+      hint:
+        "Modern outline versions (post S3 migration) expose a real S3 presigned POST URL here. " +
+        "This dev wiki is on the legacy files.create flow. To upload a local file: " +
+        "first publish it somewhere Bearer-fetchable (e.g. your own S3 / OSS / a public pastebin), " +
+        "then call `outline_attachment_upload {url: <public_url>, name, documentId}`.",
+    });
+  }
+
+  // Step 2: PUT to S3. S3 presigned POST expects every entry in `form`
+  // to appear in the multipart body BEFORE the `file` field, in the
+  // same order they were issued. Object.entries preserves insertion order.
+  try {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(form)) {
+      if (typeof v === "string") fd.append(k, v);
+    }
+    fd.append("file", new Blob([new Uint8Array(buffer)], { type: contentType }), args.name);
+    const res = await fetch(uploadUrl, { method: "POST", body: fd });
+    if (!res.ok) {
+      const text = await res.text();
+      const snippet = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+      throw new Error(`S3 PUT failed: HTTP ${res.status} ${res.statusText}: ${snippet}`);
+    }
+  } catch (err) {
+    return textResult({ error: `attachment S3 PUT (step 2) failed: ${(err).message}` });
+  }
+
+  return textResult({
+    ok: true,
+    method: "attachments.create (S3 presigned)",
+    request: { name: args.name, contentType, size, documentId, preset, path },
+    attachment: attachment ?? null,
+    summary: attachment
+      ? { id: attachment.id, name: args.name, contentType, size, url: attachment.url ?? null }
+      : null,
+  });
+}
+
+function isLegacyFilesCreateUploadUrl(uploadUrl: string): boolean {
+  if (uploadUrl.startsWith("/api/files.create")) return true;
+  try {
+    return new URL(uploadUrl).pathname === "/api/files.create";
+  } catch {
+    return false;
+  }
 }
 
 // --- helpers ---
@@ -325,15 +506,33 @@ function validCategories() {
 function printUsage() {
   const cats = validCategories().join(" | ");
   console.error([
-    "Usage: outline-tool <category>.<method> '<args-json>'",
+    "Usage: outline-tool <method> '<args-json>'",
     "",
     `Categories: ${cats}`,
     "",
+    "Methods (15, 100% aligned with MCP tools — MCP names or short names both accepted):",
+    "  MCP name          short name",
+    "  outline_doc_list        doc.list",
+    "  outline_doc_get         doc.get",
+    "  outline_doc_create      doc.create",
+    "  outline_doc_update      doc.update",
+    "  outline_doc_delete      doc.delete",
+    "  outline_doc_archive     doc.archive",
+    "  outline_doc_restore     doc.restore",
+    "  outline_doc_move        doc.move",
+    "  outline_search_query    search.query",
+    "  outline_collection_list        collection.list",
+    "  outline_collection_documents    collection.documents",
+    "  outline_collection_create       collection.create",
+    "  outline_collection_update       collection.update",
+    "  outline_rev_log         doc.rev_log",
+    "  outline_attachment_upload       attachment.upload",
+    "",
     "Examples:",
     '  outline-tool doc.list \'{"limit":2}\'',
-    '  outline-tool doc.get \'{"id":"..."}\'',
-    '  outline-tool search.query \'{"query":"redis sentinel"}\'',
-    '  outline-tool collection.list \'{}\'',
+    '  outline-tool outline_doc_get \'{"id":"..."}\'',
+    '  outline-tool outline_search_query \'{"query":"redis sentinel"}\'',
+    '  outline-tool outline_rev_log \'{"documentId":"...","limit":5}\'',
     '  outline-tool attachment.upload \'{"name":"x.png","url":"https://...","preset":"documentAttachment"}\'',
     "",
     "Env (same as OpenClaw plugin):",
