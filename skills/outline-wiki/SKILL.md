@@ -218,3 +218,23 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 ```
 
 ⚠️ **改 `config` 段必须** `systemctl --user restart openclaw-gateway.service` (OpenClaw 不会热加载 plugin entries.config).
+
+---
+
+## 硬性一致性契约 (CP-2062)
+
+> 本节是 CP-2062 写入的硬性契约, 与下方 `tests/cli-vs-tools-parity.test.ts` 一一对应. 任何违反本节的改动视为 bug, 必须在合并前修复.
+
+**契约**: CLI (`outline-tool <category>.<method>`) 每个 method 的 **参数解析顺序 / 默认值 / fallback / 后续副作用 (如 documents.info verify / changelog 写 revision)** 必须与 OpenClaw 原生 named tool (`outline_<category>_<method>`) **完全一致** —— 同一份 args, 两条路径必须产出**等价**的 outline REST 请求 body (以及同样的副作用). 两条路径有任何不一致 → 测试红 (`tests/cli-vs-tools-parity.test.ts`) → 视为 bug.
+
+**具体已对齐的差异点 (CP-2062 修复)**:
+
+1. **`doc.create` collectionId 解析顺序**: `args.collectionId` > `cfg.defaultCollectionId`. 两者都缺时, CLI **必须**返回明确错误 (`doc.create requires collectionId ... — pass it as an arg, or set defaultCollectionId in the plugin config`), 不允许静默 `collectionId: undefined` 透传给 outline.
+2. **`doc.create` 成功后 verify**: 调用 `documents.info { id }` 二次确认 `data.id` 非空. verify 失败 → 返 `documents.create verify failed for id "..."` 错误 (非静默成功).
+3. **`doc.update` 四参数**: `editMode` (默认 `"replace"`, 仅在 text 设了时附加), `publish` (bool, 不设则不传), `changelog` (成功后 best-effort 写最新 revision 的 `name`), `strictChangelog` (默认 false; true 时 changelog 写失败硬失败). 任一字段与 OpenClaw tool 侧行为不一致 → 测试红.
+4. **`search.query` 默认 limit**: 25 (OpenClaw tool 也是 `pickNumber(args.limit, 25)`). 不允许保留旧的 10.
+
+**强制守护**:
+- 改 `src/cli.ts` 任一 method 的参数/fallback/verify 逻辑时, 必须同步改 `src/index.ts` 中对应的 OpenClaw tool handler (或反之). 不允许只改一边.
+- `npm test` 必须全绿 (`tests/cli-vs-tools-parity.test.ts` 是兜底). 任何 parity 测试红 = 必须修复, 不允许 skip / `.todo` / `.skip`.
+- 详见 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) 与 PR 模板.

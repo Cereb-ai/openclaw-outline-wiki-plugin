@@ -1,14 +1,14 @@
 # @cereb/outline-wiki-openclaw-plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](package.json)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-%3E%3D2026.5.17-purple.svg)](https://docs.openclaw.ai)
 
-OpenClaw native plugin for Outline Wiki knowledge bases — exposes 13 named tools (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy single-dispatcher pattern with one named tool per Outline REST method.
+OpenClaw native plugin for Outline Wiki knowledge bases — exposes 15 named tools (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy single-dispatcher pattern with one named tool per Outline REST method.
 
 ## Features
 
-- **13 named tools** covering documents, search, collections, attachments, and revision history.
+- **15 named tools** covering documents, search, collections, attachments, and revision history.
 - **Two invocation paths** — call as an OpenClaw named tool, or use the bundled `outline-tool` CLI from OpenCode, a terminal, or CI.
 - **Document hierarchy** — `outline_doc_create` and `outline_doc_move` accept an optional `parentDocumentId` to nest a document under a parent in the same call.
 - **Fail-fast on missing config** — clear error messages, never silent fallback.
@@ -20,19 +20,36 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes 13 named too
 |---|---|---|
 | `outline_doc_list` | list documents (returns text in payload) | — |
 | `outline_doc_get` | single document + full markdown body | `id` |
-| `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`) | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
-| `outline_doc_update` | update text / title; rejects `parentDocumentId` (use `outline_doc_move` to reparent) | `id` + (`text` or `title`) |
+| `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`; verifies via `documents.info` on success); falls back to `cfg.defaultCollectionId` when `collectionId` is omitted | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
+| `outline_doc_update` | update text / title; rejects `parentDocumentId` (use `outline_doc_move` to reparent); supports `editMode` (default `replace`), `publish`, best-effort `changelog` writing to the latest revision's `name`, and `strictChangelog` (when true, changelog failure hard-fails) | `id` + (`text` or `title`) |
 | `outline_doc_delete` | trash (default) or hard-delete (`permanent: true`, requires already-trashed) | `id` |
 | `outline_doc_archive` | move to archive (admin-readable, recoverable) | `id` |
 | `outline_doc_restore` | restore from archive | `id` |
 | `outline_doc_move` | move to a different collection (accepts `parentDocumentId` to reparent in the same call) | `id`, `collectionId` |
-| `outline_search_query` | full-text search | `query` |
+| `outline_search_query` | full-text search (default `limit=25`) | `query` |
 | `outline_collection_list` | list all collections | — |
 | `outline_collection_documents` | list documents in a collection (includes children structure) | `id` (collection id) |
+| `outline_collection_create` | create a collection (permission defaults to `read_write`, sharing defaults to `true`) | `name` |
+| `outline_collection_update` | update an existing collection (name / description / icon / color / permission / sharing) | `id` + (name / description / icon / color / permission / sharing ≥ 1) |
 | `outline_attachment_upload` | upload via S3 presigned POST (`url` or `path` mode) | `name` + (`url` or `path`) |
 | `outline_rev_log` | revision metadata (name / timestamp / author) for a document | `documentId` |
 
 Per-tool argument schemas, the OpenClaw agent skill, and the 避坑清单 live in [`skills/outline-wiki/SKILL.md`](skills/outline-wiki/SKILL.md).
+
+## CLI ↔ OpenClaw named-tool parity contract (CP-2062)
+
+> **Hard contract**: the `outline-tool <category>.<method>` CLI is a 1:1 mirror of the OpenClaw named tool `outline_<category>_<method>`. For every method, **the same `args` must produce equivalent outline REST request bodies** (and the same post-success side effects such as `documents.info` verify or changelog writing).
+>
+> If you change a parameter default, fallback, or side effect in **either** path, you must update the other — and `npm test` (specifically `tests/cli-vs-tools-parity.test.ts`, 23 parity cases) must stay green. A red parity test is a bug, not a flaky test.
+>
+> Concretely, the following must always hold (see the parity test for the canonical assertions):
+>
+> 1. `doc.create`: `collectionId` resolution order is `args.collectionId` > `cfg.defaultCollectionId`; both missing → explicit error (no silent `undefined` body).
+> 2. `doc.create`: on success the handler calls `documents.info { id }` and returns an error if the verify body has no `id`.
+> 3. `doc.update`: accepts `editMode` (default `"replace"`), `publish` (omitted unless set), `changelog` (best-effort `revisions.update` of the latest revision's `name`), and `strictChangelog` (when true, changelog failure hard-fails the response).
+> 4. `search.query`: default `limit=25` (matches OpenClaw tool's `pickNumber(args.limit, 25)`).
+>
+> Same method names across both paths (`outline_doc_create` / `doc.create` are aliases — see `MCP_ALIASES` in `src/cli.ts`).
 
 ## Installation
 

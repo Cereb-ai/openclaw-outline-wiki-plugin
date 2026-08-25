@@ -41,6 +41,7 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
 
 // 100% parity with the OpenClaw native MCP tool names (outline_*).
@@ -190,7 +191,7 @@ async function dispatch(
 async function dispatchDoc(
   method: string,
   args: Record<string, unknown>,
-  cfg: { apiToken: string; endpoint: string },
+  cfg: { apiToken: string; endpoint: string; defaultCollectionId?: string },
 ) {
   switch (method) {
     case "list": {
@@ -206,19 +207,142 @@ async function dispatchDoc(
       return textResult({ ok: true, method: "documents.info", ...data?.data ?? {} });
     }
     case "create": {
-      const body = { title: args.title, text: args.text, collectionId: args.collectionId, publish: args.publish ?? true };
-      if (typeof args.parentDocumentId === "string") body.parentDocumentId = args.parentDocumentId;
-      const data = await outlineFetch(cfg, "documents.create", body);
-      return textResult({ ok: true, method: "documents.create", ...data?.data ?? {} });
+      if (typeof args.title !== "string" || args.title.length === 0) {
+        return textResult({ error: "doc.create requires a non-empty `title` (string) argument." });
+      }
+      if (typeof args.text !== "string") {
+        return textResult({ error: "doc.create requires `text` (string) argument (markdown body)." });
+      }
+      // collectionId resolution order: explicit args.collectionId > cfg.defaultCollectionId.
+      // Mirrors outline_doc_create (index.ts:541-551). Falls back to config; if
+      // both are missing, surface an explicit error rather than silently sending
+      // `collectionId: undefined` to outline (which returns 400 validation_error).
+      const collectionId =
+        (typeof args.collectionId === "string" && args.collectionId.length > 0
+          ? args.collectionId
+          : undefined) ?? cfg.defaultCollectionId;
+      if (!collectionId) {
+        return textResult({
+          error:
+            "doc.create requires `collectionId` (string) — pass it as an arg, or set `defaultCollectionId` in the plugin config.",
+        });
+      }
+      const body: Record<string, unknown> = {
+        title: args.title,
+        text: args.text,
+        collectionId,
+        publish: typeof args.publish === "boolean" ? args.publish : true,
+      };
+      if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
+        body.parentDocumentId = args.parentDocumentId;
+      }
+      try {
+        const data = await outlineFetch(cfg, "documents.create", body);
+        const created = data?.data ?? null;
+        const createdId = created?.id;
+        if (typeof createdId !== "string" || createdId.length === 0) {
+          return textResult({
+            error: "documents.create returned empty data — server may have failed silently",
+          });
+        }
+        try {
+          await verifyCreatedDocument(cfg, createdId);
+        } catch (err) {
+          return textResult({
+            error: `documents.create verify failed for id "${createdId}": ${errorMessage(err)}`,
+          });
+        }
+        return textResult({
+          ok: true,
+          method: "documents.create",
+          request: body,
+          document: created,
+          summary: created
+            ? {
+                id: created.id,
+                title: created.title,
+                url: created.url,
+                urlId: created.urlId,
+                revision: created.revision,
+                publishedAt: created.publishedAt ?? null,
+              }
+            : null,
+        });
+      } catch (err) {
+        if (errorMessage(err).startsWith("Response was not JSON (HTTP 200):")) {
+          return textResult({ error: "documents.create returned empty data — server may have failed silently" });
+        }
+        return textResult({ error: `documents.create failed: ${errorMessage(err)}` });
+      }
     }
     case "update": {
-      const body = { id: args.id };
-      if (typeof args.text === "string") body.text = args.text;
-      if (typeof args.title === "string") body.title = args.title;
-      if (typeof args.parentDocumentId === "string")
-        return textResult({ error: "doc.update does not accept parentDocumentId (server silently drops it). Use doc.move to reparent." });
-      const data = await outlineFetch(cfg, "documents.update", body);
-      return textResult({ ok: true, method: "documents.update", ...data?.data ?? {} });
+      if (typeof args.id !== "string" || args.id.length === 0) {
+        return textResult({ error: "doc.update requires a non-empty `id` (string) argument." });
+      }
+      // parentDocumentId is rejected (server silently drops it) — mirror outline_doc_update
+      // (index.ts:648-659). Reparent via doc.move instead.
+      if (args.parentDocumentId !== undefined) {
+        return textResult({
+          error:
+            "doc.update does not accept `parentDocumentId` — the outline server silently drops it. " +
+            "To reparent a document, use doc.move with the new `collectionId` (same collection is fine) and the new `parentDocumentId`. " +
+            "Example: doc.move {id, collectionId, parentDocumentId: '<new-parent-uuid>'}.",
+        });
+      }
+      if (typeof args.text !== "string" && typeof args.title !== "string") {
+        return textResult({
+          error: "doc.update requires at least one of `text` or `title` (string) to change.",
+        });
+      }
+      const body: Record<string, unknown> = { id: args.id };
+      if (typeof args.text === "string") {
+        body.text = args.text;
+        body.editMode = typeof args.editMode === "string" ? args.editMode : "replace";
+      }
+      if (typeof args.title === "string") {
+        body.title = args.title;
+      }
+      if (typeof args.publish === "boolean") body.publish = args.publish;
+      // Best-effort changelog (mirrors outline_doc_update: write latest revision's `name`).
+      // Non-fatal unless `strictChangelog=true`.
+      const warnings: string[] = [];
+      try {
+        const data = await outlineFetch(cfg, "documents.update", body);
+        const updated = data?.data ?? null;
+        if (typeof args.changelog === "string" && args.changelog.length > 0) {
+          const result = await writeChangelog(args.id, args.changelog, cfg);
+          if ("warning" in result) {
+            if (args.strictChangelog === true) {
+              return textResult({
+                error: `documents.update changelog write failed with strictChangelog=true: ${result.warning}`,
+                method: "documents.update",
+                request: body,
+                document: updated,
+              });
+            }
+            warnings.push(result.warning);
+          }
+        }
+        return textResult({
+          ok: true,
+          method: "documents.update",
+          request: body,
+          document: updated,
+          summary: updated
+            ? {
+                id: updated.id,
+                title: updated.title,
+                url: updated.url,
+                urlId: updated.urlId,
+                revision: updated.revision,
+                updatedAt: updated.updatedAt ?? null,
+              }
+            : null,
+          warnings: warnings.length > 0 ? warnings : undefined,
+        });
+      } catch (err) {
+        return textResult({ error: `documents.update failed: ${errorMessage(err)}` });
+      }
     }
     case "delete": {
       if (typeof args.id !== "string") return textResult({ error: "doc.delete requires a non-empty `id` (string)" });
@@ -319,7 +443,7 @@ async function dispatchSearch(
   args: Record<string, unknown>,
   cfg: { apiToken: string; endpoint: string },
 ) {
-  const body = { query: args.query, limit: args.limit ?? 10, offset: args.offset ?? 0 };
+  const body = { query: args.query, limit: pickNumber(args.limit, 25), offset: pickNumber(args.offset, 0) };
   if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
   const data = await outlineFetch(cfg, "documents.search", body);
   return textResult({ ok: true, method: "documents.search", results: data?.data ?? [], pagination: data?.pagination ?? null });
@@ -474,6 +598,72 @@ function isLegacyFilesCreateUploadUrl(uploadUrl: string): boolean {
 
 // --- helpers ---
 
+async function verifyCreatedDocument(
+  cfg: { apiToken: string; endpoint: string },
+  id: string,
+): Promise<void> {
+  const info = await outlineFetch(cfg, "documents.info", { id });
+  const verifiedId = info?.data?.id;
+  if (typeof verifiedId !== "string" || verifiedId.length === 0) {
+    throw new Error("documents.info returned empty data");
+  }
+}
+
+/**
+ * Best-effort changelog write for doc.update. Mirrors writeChangelog in
+ * index.ts: after a successful `documents.update`, look up the latest revision
+ * for the given documentId and write `changelog` into its `name` field via
+ * `revisions.update`. Failures return `{warning}` instead of throwing, so the
+ * caller can decide whether to fail hard (strictChangelog=true) or just
+ * surface a warning.
+ *
+ * Returns `{ok: true}` on success or `{warning: string}` on failure.
+ */
+async function writeChangelog(
+  documentId: string,
+  changelog: string,
+  cfg: { apiToken: string; endpoint: string },
+): Promise<{ ok: true } | { warning: string }> {
+  let listed: any;
+  try {
+    listed = await outlineFetch(cfg, "revisions.list", {
+      documentId,
+      limit: 1,
+      direction: "DESC",
+    });
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.list failed: ${errorMessage(err)}`,
+    };
+  }
+  const latest = listed?.data?.[0];
+  if (!latest || typeof latest.id !== "string") {
+    return {
+      warning:
+        "changelog write skipped: revisions.list returned no revisions for the updated document.",
+    };
+  }
+  try {
+    await outlineFetch(cfg, "revisions.update", {
+      id: latest.id,
+      name: changelog,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.update failed for revision ${latest.id}: ${errorMessage(err)}`,
+    };
+  }
+}
+
+function pickNumber(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function outlineFetch(
   cfg: { apiToken: string; endpoint: string },
   action: string,
@@ -485,14 +675,22 @@ async function outlineFetch(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${cfg.apiToken}`,
+      Accept: "application/json",
     },
     body: JSON.stringify(body),
   });
+  const text = await res.text();
   if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Outline API ${res.status}: ${errText.slice(0, 300)}`);
+    const snippet = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+    throw new Error(`Outline API ${res.status}: ${snippet}`);
   }
-  return res.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Response was not JSON (HTTP ${res.status}): ${text.slice(0, 200)}`,
+    );
+  }
 }
 
 function textResult(data: Record<string, unknown>): { content: { type: string; text: string }[]; details: Record<string, unknown>; isError: boolean } {
@@ -543,7 +741,40 @@ function printUsage() {
   ].join("\n"));
 }
 
-main().catch((e) => {
-  console.error(`outline-tool: fatal: ${(e).message}`);
-  process.exit(99);
-});
+// Only run main() when this file is invoked as the CLI entrypoint (e.g. via
+// the `outline-tool` bin) — not when it's imported by a test or other module.
+// Without this guard, `vitest` would inherit the process.exit() path and
+// parity tests could not import the dispatch surface.
+const isCliEntry = (() => {
+  try {
+    const argv1 = process.argv[1];
+    if (!argv1) return false;
+    return import.meta.url === pathToFileURL(argv1).href;
+  } catch {
+    return false;
+  }
+})();
+if (isCliEntry) {
+  main().catch((e) => {
+    console.error(`outline-tool: fatal: ${(e).message}`);
+    process.exit(99);
+  });
+}
+
+// Export dispatch surface for parity tests (tests/cli-vs-tools-parity.test.ts).
+// When cli.ts is imported by vitest, main() is NOT invoked (see isCliEntry
+// guard above), so importing these named exports is side-effect free.
+export {
+  dispatch,
+  dispatchDoc,
+  dispatchCollection,
+  dispatchSearch,
+  dispatchAttachment,
+  verifyCreatedDocument,
+  writeChangelog,
+  outlineFetch,
+  pickNumber,
+  errorMessage,
+  textResult,
+  MCP_ALIASES,
+};
