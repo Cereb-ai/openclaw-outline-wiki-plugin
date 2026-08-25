@@ -42,6 +42,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 
 // 100% parity with the OpenClaw native MCP tool names (outline_*).
 const MCP_ALIASES: Record<string, string> = {
@@ -190,14 +191,20 @@ async function dispatch(
 async function dispatchDoc(
   method: string,
   args: Record<string, unknown>,
-  cfg: { apiToken: string; endpoint: string },
+  cfg: { apiToken: string; endpoint: string; defaultCollectionId?: string },
 ) {
   switch (method) {
     case "list": {
-      const body = { limit: args.limit ?? 25, offset: args.offset ?? 0 };
+      // Mirror index.ts docList: pickNumber → finite-number or 25 default.
+      const body = { limit: pickNumber(args.limit, 25), offset: pickNumber(args.offset, 0) };
       if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
       if (typeof args.query === "string") body.query = args.query;
-      const data = await outlineFetch(cfg, "documents.list", body);
+      let data;
+      try {
+        data = await outlineFetch(cfg, "documents.list", body);
+      } catch (err) {
+        return textResult({ error: `documents.list failed: ${(err).message}` });
+      }
       return textResult({ ok: true, method: "documents.list", documents: data?.data ?? [], pagination: data?.pagination ?? null });
     }
     case "get": {
@@ -206,19 +213,111 @@ async function dispatchDoc(
       return textResult({ ok: true, method: "documents.info", ...data?.data ?? {} });
     }
     case "create": {
-      const body = { title: args.title, text: args.text, collectionId: args.collectionId, publish: args.publish ?? true };
-      if (typeof args.parentDocumentId === "string") body.parentDocumentId = args.parentDocumentId;
-      const data = await outlineFetch(cfg, "documents.create", body);
-      return textResult({ ok: true, method: "documents.create", ...data?.data ?? {} });
+      if (typeof args.title !== "string" || args.title.length === 0) {
+        return textResult({ error: "doc.create requires a non-empty `title` (string)" });
+      }
+      if (typeof args.text !== "string") {
+        return textResult({ error: "doc.create requires `text` (string) argument (markdown body)." });
+      }
+      // collectionId resolution order: explicit args.collectionId > cfg.defaultCollectionId.
+      // Mirrors index.ts docCreate — both args AND config can supply it, both missing = hard error
+      // (no silent drop, no implicit first-collection fallback).
+      const collectionId =
+        (typeof args.collectionId === "string" && args.collectionId.length > 0
+          ? args.collectionId
+          : undefined) ??
+        cfg.defaultCollectionId;
+      if (!collectionId) {
+        return textResult({
+          error:
+            "doc.create requires `collectionId` (string) — pass it as an arg, or set `defaultCollectionId` in the plugin config.",
+        });
+      }
+      const body = { title: args.title, text: args.text, collectionId, publish: args.publish ?? true };
+      if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
+        body.parentDocumentId = args.parentDocumentId;
+      }
+      let data;
+      try {
+        data = await outlineFetch(cfg, "documents.create", body);
+      } catch (err) {
+        return textResult({ error: `documents.create failed: ${(err).message}` });
+      }
+      const created = data?.data ?? null;
+      const createdId = created?.id;
+      if (typeof createdId !== "string" || createdId.length === 0) {
+        return textResult({
+          error: "documents.create returned empty data — server may have failed silently",
+        });
+      }
+      // Mirror index.ts verifyCreatedDocument: confirm data.id via documents.info.
+      try {
+        await verifyCreatedDocument(cfg, createdId);
+      } catch (err) {
+        return textResult({
+          error: `documents.create verify failed for id "${createdId}": ${(err).message}`,
+        });
+      }
+      return textResult({ ok: true, method: "documents.create", document: created });
     }
     case "update": {
+      if (typeof args.id !== "string" || args.id.length === 0) {
+        return textResult({ error: "doc.update requires a non-empty `id` (string)" });
+      }
+      // Mirrors index.ts docUpdate fail-fast: outline's documents.update schema does NOT
+      // include parentDocumentId — server silently drops it. Callers must use doc.move.
+      if (args.parentDocumentId !== undefined) {
+        return textResult({
+          error:
+            "doc.update does not accept `parentDocumentId` — the outline server silently drops it. " +
+            "To reparent, use doc.move with the new `collectionId` (same collection is fine) and the new `parentDocumentId`.",
+        });
+      }
+      if (typeof args.text !== "string" && typeof args.title !== "string") {
+        return textResult({
+          error: "doc.update requires at least one of `text` or `title` (string) to change.",
+        });
+      }
       const body = { id: args.id };
-      if (typeof args.text === "string") body.text = args.text;
+      if (typeof args.text === "string") {
+        body.text = args.text;
+        body.editMode = typeof args.editMode === "string" ? args.editMode : "replace";
+      }
       if (typeof args.title === "string") body.title = args.title;
-      if (typeof args.parentDocumentId === "string")
-        return textResult({ error: "doc.update does not accept parentDocumentId (server silently drops it). Use doc.move to reparent." });
-      const data = await outlineFetch(cfg, "documents.update", body);
-      return textResult({ ok: true, method: "documents.update", ...data?.data ?? {} });
+      if (typeof args.publish === "boolean") body.publish = args.publish;
+
+      const warnings = [];
+      let data;
+      try {
+        data = await outlineFetch(cfg, "documents.update", body);
+      } catch (err) {
+        return textResult({ error: `documents.update failed: ${(err).message}` });
+      }
+      const updated = data?.data ?? null;
+
+      // Best-effort changelog write (mirrors index.ts writeChangelog).
+      if (typeof args.changelog === "string" && args.changelog.length > 0) {
+        const cl = await writeChangelog(args.id, args.changelog, cfg);
+        if ("warning" in cl) {
+          if (args.strictChangelog === true) {
+            return textResult({
+              error: `documents.update changelog write failed with strictChangelog=true: ${cl.warning}`,
+              method: "documents.update",
+              request: body,
+              document: updated,
+            });
+          }
+          warnings.push(cl.warning);
+        }
+      }
+
+      return textResult({
+        ok: true,
+        method: "documents.update",
+        request: body,
+        document: updated,
+        warnings: warnings.length > 0 ? warnings : undefined,
+      });
     }
     case "delete": {
       if (typeof args.id !== "string") return textResult({ error: "doc.delete requires a non-empty `id` (string)" });
@@ -319,10 +418,23 @@ async function dispatchSearch(
   args: Record<string, unknown>,
   cfg: { apiToken: string; endpoint: string },
 ) {
-  const body = { query: args.query, limit: args.limit ?? 10, offset: args.offset ?? 0 };
+  if (typeof args.query !== "string" || args.query.trim().length === 0) {
+    return textResult({ error: "search.query requires a non-empty `query` (string)" });
+  }
+  // Mirror index.ts searchQuery: limit default = 25 (not 10), via pickNumber helper.
+  const body = {
+    query: args.query,
+    limit: pickNumber(args.limit, 25),
+    offset: pickNumber(args.offset, 0),
+  };
   if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
-  const data = await outlineFetch(cfg, "documents.search", body);
-  return textResult({ ok: true, method: "documents.search", results: data?.data ?? [], pagination: data?.pagination ?? null });
+  let data;
+  try {
+    data = await outlineFetch(cfg, "documents.search", body);
+  } catch (err) {
+    return textResult({ error: `documents.search failed: ${(err).message}` });
+  }
+  return textResult({ ok: true, method: "documents.search", documents: data?.data ?? [], pagination: data?.pagination ?? null });
 }
 
 async function dispatchAttachment(
@@ -499,6 +611,65 @@ function textResult(data: Record<string, unknown>): { content: { type: string; t
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data, isError: data?.error ? true : false };
 }
 
+// Mirrors index.ts: only accept finite numbers, fall back to a default for
+// missing / non-numeric values. Used by search (limit, offset) etc.
+function pickNumber(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+// Mirrors index.ts verifyCreatedDocument: confirm data.id via documents.info.
+async function verifyCreatedDocument(
+  cfg: { apiToken: string; endpoint: string },
+  id: string,
+): Promise<void> {
+  const info = await outlineFetch(cfg, "documents.info", { id });
+  const verifiedId = info?.data?.id;
+  if (typeof verifiedId !== "string" || verifiedId.length === 0) {
+    throw new Error("documents.info returned empty data");
+  }
+}
+
+// Mirrors index.ts writeChangelog: best-effort write of `changelog` into the
+// latest revision's `name` field via revisions.list + revisions.update.
+// Returns {ok: true} on success, {warning: string} on failure (caller decides
+// whether to surface the warning vs hard-fail based on strictChangelog).
+async function writeChangelog(
+  documentId: string,
+  changelog: string,
+  cfg: { apiToken: string; endpoint: string },
+): Promise<{ ok: true } | { warning: string }> {
+  let listed;
+  try {
+    listed = await outlineFetch(cfg, "revisions.list", {
+      documentId,
+      limit: 1,
+      direction: "DESC",
+    });
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.list failed: ${(err).message}`,
+    };
+  }
+  const latest = listed?.data?.[0];
+  if (!latest || typeof latest.id !== "string") {
+    return {
+      warning:
+        "changelog write skipped: revisions.list returned no revisions for the updated document.",
+    };
+  }
+  try {
+    await outlineFetch(cfg, "revisions.update", {
+      id: latest.id,
+      name: changelog,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      warning: `changelog write skipped: revisions.update failed for revision ${latest.id}: ${(err).message}`,
+    };
+  }
+}
+
 function validCategories() {
   return ["doc", "collection", "search", "attachment"];
 }
@@ -543,7 +714,37 @@ function printUsage() {
   ].join("\n"));
 }
 
-main().catch((e) => {
-  console.error(`outline-tool: fatal: ${(e).message}`);
-  process.exit(99);
-});
+// Only auto-run main() when invoked as a CLI binary (not when imported for tests).
+// ESM equivalent of `require.main === module`: check that this module is the
+// entry point via `import.meta.url === pathToFileURL(process.argv[1]).href`.
+const isCliEntry = (() => {
+  try {
+    if (!process.argv[1]) return false;
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  } catch {
+    return false;
+  }
+})();
+if (isCliEntry) {
+  main().catch((e) => {
+    console.error(`outline-tool: fatal: ${(e).message}`);
+    process.exit(99);
+  });
+}
+
+// Exported for parity tests (tests/cli-vs-mcp-parity.test.ts). Do NOT export as a
+// public API — these are internal dispatchers, not stable contract. Internal
+// export is allowed because cli.ts has @ts-nocheck (TS surface is not part of
+// the package's published API).
+export {
+  dispatch,
+  dispatchDoc,
+  dispatchCollection,
+  dispatchSearch,
+  dispatchAttachment,
+  outlineFetch,
+  pickNumber,
+  verifyCreatedDocument,
+  writeChangelog,
+  textResult,
+};

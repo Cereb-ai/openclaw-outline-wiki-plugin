@@ -218,3 +218,42 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 ```
 
 ⚠️ **改 `config` 段必须** `systemctl --user restart openclaw-gateway.service` (OpenClaw 不会热加载 plugin entries.config).
+
+---
+
+## 硬性契约：CLI ↔ MCP 100% 对齐 (CP-2060)
+
+**契约**: 本插件每个 method 在两条调用路径下的 **参数、默认值、fallback、verify 行为** 必须完全一致, 不一致视为 bug.
+
+- **路径 A** (OpenClaw 原生): 15 个 named tool (`outline_doc_*` / `outline_search_query` / `outline_collection_*` / `outline_attachment_upload` / `outline_rev_log`)
+- **路径 B** (CLI 二进制): `outline-tool <method>` (MCP 名 `outline_*` 或短 `category.method` 均接受)
+
+具体绑定关系:
+
+| 不一致维度 | 路径 A (MCP) 行为 | 路径 B (CLI) 行为 |
+|---|---|---|
+| `outline_doc_create.collectionId` 解析顺序 | args.collectionId > cfg.defaultCollectionId, 两者皆缺 → 返回明确错误 | 同左 (CP-2060 修复前: 静默丢弃 cfg.defaultCollectionId) |
+| `outline_doc_create` 成功后 verify | 调 `documents.info` 确认 `data.id` 非空, 失败返回 error | 同左 (CP-2060 修复前: 无 verify) |
+| `outline_doc_update.editMode` | 默认 `"replace"` (string) | 同左 |
+| `outline_doc_update.publish` | boolean, 可选 | 同左 |
+| `outline_doc_update.changelog` | 可选 string, 写入最新 revision `name` (best-effort) | 同左 |
+| `outline_doc_update.strictChangelog` | bool, 默认 false; true 时 changelog 写失败 → 硬失败 | 同左 (CP-2060 修复前: 完全无此参数) |
+| `outline_search_query.limit` 默认值 | `pickNumber(args.limit, 25)` | 同左 (CP-2060 修复前: 默认 10) |
+
+**反断言 (任一不一致 → FAIL)**:
+
+1. `tests/cli-vs-mcp-parity.test.ts` 中任何一条 parity 测试失败 → 视为回归, 必须修复并重新跑 `npm test` (vitest run).
+2. 路径 A 工具接受但路径 B CLI 拒收任何参数 (例如 `changelog`, `strictChangelog`, `editMode`, `publish`, `parentDocumentId`) → 视为 bug.
+3. 默认值在两条路径下不同 (例如 `limit=25` vs `limit=10`) → 视为 bug.
+4. 任一路径"静默成功"而另一条路径"明确报错" (例如 verify 失败、collectionId 缺失) → 视为 bug.
+5. 路径 A 或路径 B 文档/工具说明中的方法数、参数列表、必填项、默认值与实际行为不符 → 视为 bug, 必须同步 README + SKILL.md.
+
+**为什么这是硬性契约**:
+
+- 同一份 args 通过不同入口必须产生同一份 wire 请求体 (`POST /api/documents.create` body 完全一致). 这才能让 agent 在两条路径之间无缝切换, 不需要为同一种业务改两份调用.
+- 任何路径的"静默成功" (例如无 verify、丢 fallback) 都会让另一条路径的明确错误显得"莫名其妙的不可靠", 直接破坏 OpenClaw / codex 跨 agent 移植能力.
+- 真正的 source-of-truth 在 `src/index.ts` (MCP 工具定义 + handler), `src/cli.ts` 必须**镜像**而非**独立实现** (CP-2060 之前 4 处差异即由此而生).
+
+**测试基线**:
+- `npm test` (`vitest run`) 必须包含 `tests/cli-vs-mcp-parity.test.ts` 且全绿.
+- 新增 method / 新增参数 → 必须同步扩展 parity 测试, 否则 PR 拒绝.
