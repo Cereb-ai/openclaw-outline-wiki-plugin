@@ -218,3 +218,32 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 ```
 
 ⚠️ **改 `config` 段必须** `systemctl --user restart openclaw-gateway.service` (OpenClaw 不会热加载 plugin entries.config).
+
+---
+
+## CLI ↔ MCP 行为对照 (知情性说明)
+
+本节面向**调用方** (agent / 终端用户), 用于了解 CLI 与 OpenClaw 原生 named tools 的实际行为一致性, 不是开发约束.
+
+- **路径 A** (OpenClaw 原生): 15 个 named tool (`outline_doc_*` / `outline_search_query` / `outline_collection_*` / `outline_attachment_upload` / `outline_rev_log`)
+- **路径 B** (CLI 二进制): `outline-tool <method>` (MCP 名 `outline_*` 或短 `category.method` 均接受)
+
+两条路径下, **方法名、参数/必填项、默认值、fallback、verify 行为** 是一致的 — 你用同一份 args 调任一路径, 期望产出同一份 wire 请求体 (例如 `POST /api/documents.create` body) 和同一份响应.
+
+具体行为对照 (供调用方知情, 不是契约):
+
+| 维度 | 路径 A (OpenClaw 原生 tool) | 路径 B (`outline-tool` CLI) |
+|---|---|---|
+| `outline_doc_create.collectionId` 解析 | `args.collectionId` > `cfg.defaultCollectionId`; 两者皆缺 → 返回明确错误 (无静默丢弃) | 同左 |
+| `outline_doc_create` 成功后 verify | 调 `documents.info` 确认 `data.id` 非空; 失败 → 返回 error | 同左 |
+| `outline_doc_update.editMode` | 接受 `editMode`, 默认 `"replace"` | 同左 |
+| `outline_doc_update.publish` | 接受 `publish` (boolean, 可选) | 同左 |
+| `outline_doc_update.changelog` | 接受 `changelog` (可选 string), best-effort 写入最新 revision `name` | 同左 |
+| `outline_doc_update.strictChangelog` | 接受 `strictChangelog` (bool, 默认 false); `true` 时 changelog 写失败 → 返回硬失败 | 同左 |
+| `outline_search_query.limit` 默认值 | `pickNumber(args.limit, 25)` — 即默认 **25** | 同左 |
+
+**调用方关注点**:
+
+- 同一份 args 在两条路径下应当产生同一份 wire 请求体; 切换路径不需要改业务调用.
+- 若发现两条路径的实际行为与上表不符, 请走 issue 反馈给仓库维护方 (开发侧会在 `tests/cli-vs-mcp-parity.test.ts` 加固并修复).
+- 行为差异的实际保障由仓库内的 parity 测试承担; 调用方无需 (也不应) 在调用层做兼容性分支.
