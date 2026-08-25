@@ -10,7 +10,7 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 
 - **15 named tools** covering documents, search, collections, attachments, and revision history.
 - **Two invocation paths** — call as an OpenClaw named tool, or use the bundled `outline-tool` CLI from OpenCode, a terminal, or CI.
-- **CLI ↔ MCP 100% parity (hard contract)** — every method's parameters, defaults, fallbacks, and verify behavior are identical between the OpenClaw tool and the CLI. Enforced by `tests/cli-vs-mcp-parity.test.ts`; see `skills/outline-wiki/SKILL.md` for the contract table.
+- **CLI ↔ MCP aligned behavior** — every method's parameters, defaults, fallbacks, and verify behavior are consistent between the OpenClaw tool and the CLI (e.g. `outline_search_query.limit` defaults to `25`, `outline_doc_create.collectionId` falls back to `defaultCollectionId` config, post-create verify via `documents.info`). See `skills/outline-wiki/SKILL.md` for the behavior table.
 - **Document hierarchy** — `outline_doc_create` and `outline_doc_move` accept an optional `parentDocumentId` to nest a document under a parent in the same call.
 - **Fail-fast on missing config** — clear error messages, never silent fallback.
 - **Single round-trip** — `outline_doc_get` already returns the full markdown body in `data.text`; no second `documents.export` call needed.
@@ -112,7 +112,7 @@ outline_attachment_upload { name: "x.png", url: "<public-url>", documentId: "<do
 
 **Standalone CLI** `outline-tool` (for OpenCode, terminal, CI):
 
-The CLI accepts the same method names as the MCP tools (`outline_*` long names or short `category.method`), the same parameters, the same defaults, the same fallbacks, and the same verify behavior. **Same args, same wire body, same response** — see "Hard contract" below.
+The CLI accepts the same method names as the MCP tools (`outline_*` long names or short `category.method`), the same parameters, the same defaults, the same fallbacks, and the same verify behavior. **Same args, same wire body, same response** — see "CLI ↔ MCP behavior" below.
 
 ```bash
 # MCP names (preferred — match OpenClaw tool names verbatim)
@@ -135,16 +135,16 @@ outline-tool attachment.upload '{"name":"x.png","url":"https://...","documentId"
 
 Exit codes: `0` = success, `2` = JSON parse error, `3` = dispatch error, `4` = shape error, `5` = business error.
 
-### Hard contract: CLI ↔ MCP 100% parity
+### CLI ↔ MCP behavior
 
-Every method's parameters, defaults, fallbacks, and verify behavior must be identical between the OpenClaw tool and the CLI. Concretely (verified by `tests/cli-vs-mcp-parity.test.ts`):
+For your awareness as a caller: the OpenClaw named tool and the `outline-tool` CLI share the same handler code, so the following behaviors are aligned between the two paths:
 
 - `outline_doc_create.collectionId` resolves as `args.collectionId > cfg.defaultCollectionId`; both missing → explicit error (no silent drop).
-- `outline_doc_create` always verifies the result via `documents.info` (`data.id` non-empty); verify failure → error.
+- `outline_doc_create` verifies the result via `documents.info` (`data.id` non-empty); verify failure → error.
 - `outline_doc_update` accepts `editMode` (default `"replace"`), `publish`, `changelog` (best-effort revision-name write), `strictChangelog` (when `true`, changelog write failure hard-fails the response).
 - `outline_search_query.limit` defaults to **25** (not 10) via `pickNumber(args.limit, 25)`.
 
-Any drift between CLI and MCP behavior is a bug — see `skills/outline-wiki/SKILL.md` for the full contract table and "why this is a hard contract" rationale.
+If you notice drift between the two paths in practice, please file an issue — the development side will harden `tests/cli-vs-mcp-parity.test.ts` and fix the drift. See `skills/outline-wiki/SKILL.md` for the full behavior table.
 
 ## Development
 
