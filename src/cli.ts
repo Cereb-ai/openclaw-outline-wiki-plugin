@@ -42,7 +42,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // 100% parity with the OpenClaw native MCP tool names (outline_*).
 const MCP_ALIASES: Record<string, string> = {
@@ -716,13 +716,29 @@ function printUsage() {
 
 // Only auto-run main() when invoked as a CLI binary (not when imported for tests).
 // ESM equivalent of `require.main === module`: check that this module is the
-// entry point via `import.meta.url === pathToFileURL(process.argv[1]).href`.
+// entry point via realpath comparison of `import.meta.url` and `process.argv[1]`.
+// Comparing raw URLs is unreliable under standard npm installation paths —
+// `node_modules/.bin/<bin>` (and global installs / npx) invoke the CLI through
+// a symlink. Under Node ESM, `import.meta.url` is resolved to the realpath of
+// the module file, while `process.argv[1]` is the symlink path the user typed.
+// A raw URL comparison would always fail under symlink invocation, leaving
+// `main()` unrun and the CLI exiting 0 with zero output (silent failure).
 const isCliEntry = (() => {
   try {
-    if (!process.argv[1]) return false;
-    return import.meta.url === pathToFileURL(process.argv[1]).href;
+    const argv1 = process.argv[1];
+    if (!argv1) return false;
+    const argvReal = fs.realpathSync(argv1);
+    const moduleReal = fs.realpathSync(fileURLToPath(import.meta.url));
+    return argvReal === moduleReal;
   } catch {
-    return false;
+    // Fallback: plain URL comparison (works when argv1 and this module are
+    // both accessed by the same path — e.g. `node dist/cli.js` directly,
+    // or when argv1 is not a path at all in some test runners).
+    try {
+      return import.meta.url === pathToFileURL(process.argv[1]).href;
+    } catch {
+      return false;
+    }
   }
 })();
 if (isCliEntry) {
