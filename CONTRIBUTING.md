@@ -26,6 +26,21 @@ npm run build
 npm test
 ```
 
+## Build artifacts contract
+
+`dist/` is a **local build artifact**, not source. Keep it out of every commit and PR.
+
+- **`dist/` is gitignored** — see `.gitignore` (`dist/` line). It has not been tracked since commit `70b9a9e` (open-source release prep).
+- **`src/` is the single source of truth** — change `src/*.ts`; the compiler produces `dist/` deterministically.
+- **Commits and PRs contain `src/` only** — never `dist/`. If `git status` shows `dist/` entries after a build, do **not** `git add` them; fix `.gitignore` instead.
+- **Clean a stale `dist/`** with `npm run clean` (`rm -rf dist`); the next `npm run build` regenerates it.
+- **Release flow** — every release that ships to a running gateway must:
+  1. `npm run build` — produce `dist/` from the merged `src/`.
+  2. Sync the artifact copy to `/opt/openclaw-plugins` (deployment-side operation handled by ops, not this repo).
+  3. `systemctl --user restart openclaw-gateway.service` — gateway picks up new code on reload.
+
+If `git status` ever shows `dist/` entries, treat it as a contract violation: investigate, fix `.gitignore`, and do not commit the artifacts.
+
 ## Code structure
 
 - `src/index.ts` — plugin manifest + tool definitions (`defineToolPlugin`) + all handlers in one file
@@ -83,7 +98,7 @@ npm test
 ## Submitting a pull request
 
 1. Fork and create a feature branch: `git checkout -b feat/<short-description>`
-2. Make focused commits with descriptive messages.
+2. Make focused commits with descriptive messages. **Do not commit `dist/`** — see "Build artifacts contract" above.
 3. Ensure `npm run typecheck`, `npm run build`, and `npm test` all pass.
 4. Push and open a PR against `master` on the upstream repo.
 5. Describe the change in the PR body: what, why, how to test.
