@@ -164,6 +164,20 @@ npx openclaw plugins validate --entry ./dist/index.js
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code structure, how to add a new tool, and PR guidelines.
 
+## Build artifacts contract
+
+`dist/` is a **local build artifact**, not source — it must never be committed.
+
+- **`dist/` is gitignored** — see `.gitignore` line `dist/`. Commits since `70b9a9e` (open-source release prep) do not track it; PRs should not reintroduce it.
+- **`src/` is the single source of truth** — every change that affects runtime behavior starts in `src/*.ts`. The compiler (`tsc -p tsconfig.json`) produces `dist/` deterministically from `src/`.
+- **PRs and commits contain `src/` only** — never `dist/`. If `git status` shows `dist/` entries after `npm run build`, something is wrong with `.gitignore` (do not `git add` them).
+- **Release flow** — every release that ships to a running gateway must:
+  1. `npm run build` — produce `dist/` from the merged `src/`.
+  2. Sync the artifact copy to `/opt/openclaw-plugins` (deployment-side operation; see ops ticket — *not* part of this repo).
+  3. `systemctl --user restart openclaw-gateway.service` — the gateway only picks up new code after restart.
+
+If you need to reset your local `dist/`, run `npm run clean` (alias for `rm -rf dist`); the next `npm run build` will regenerate it.
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and PR workflow.
