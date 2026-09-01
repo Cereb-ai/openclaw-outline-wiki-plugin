@@ -39,7 +39,10 @@ async function executeDocCreate() {
     "test-call-id",
     {
       title: "Created from test",
-      text: "Body",
+      // CP-2395: unique sentinel so we can assert the agent's full input
+      // body does NOT round-trip into the response (request must be trimmed
+      // to {title} only).
+      text: "CP-2395 unique input body sentinel that must not round-trip",
       collectionId: "collection-id",
     },
   );
@@ -124,5 +127,20 @@ describe("outline_doc_create response validation", () => {
     // agent's toolResult (the agent just sent it via `text`).
     expect(details.document).not.toHaveProperty("text");
     expect(JSON.stringify(details)).not.toContain("Full body that the trim should drop");
+    // CP-2395: response `request` is also trimmed — only {title} is kept.
+    // The full agent-input body (text/collectionId/publish/etc) MUST NOT
+    // round-trip; otherwise the trim on `document` is undercut by an even
+    // bigger echo right next to it.
+    expect(details.request).toEqual({ title: "Created from test" });
+    expect(details.request).not.toHaveProperty("text");
+    expect(details.request).not.toHaveProperty("collectionId");
+    expect(details.request).not.toHaveProperty("publish");
+    expect(details.request).not.toHaveProperty("parentDocumentId");
+    // Reverse assertion: the unique sentinel from the agent's input MUST
+    // NOT appear anywhere in the response. The agent just sent it; it does
+    // not need to receive it back.
+    expect(JSON.stringify(details)).not.toContain(
+      "CP-2395 unique input body sentinel that must not round-trip",
+    );
   });
 });

@@ -3,8 +3,10 @@ import plugin from "../src/index";
 import {
   dispatchDoc,
   dispatchSearch,
+  trimCreateRequest,
   trimDocBody,
   trimSearchHit,
+  trimUpdateRequest,
 } from "../src/cli";
 
 // CP-2379 — response-trim contract for the three handlers that used to
@@ -17,6 +19,13 @@ import {
 //   3. outline_doc_create   — round-trip trim: the body the agent just
 //      sent via `text` MUST NOT come back in `document.text`.
 //   4. outline_doc_update   — same as doc_create.
+//
+// CP-2395 extends the contract to the request-echo: `request` used to
+// carry the full input body (`text`, `editMode`, `publish`,
+// `parentDocumentId`, ...). Round-tripping the agent's own input is
+// exactly the planner token burn CP-2379 was trying to eliminate, so
+// request is now trimmed to {title} (create) or {id[, title]} (update).
+// Same shape on MCP and CLI paths — byte-for-byte parity is asserted.
 //
 // The shared CLI handlers (src/cli.ts) MUST produce byte-for-byte
 // identical response shapes to the MCP tools — `cli-vs-mcp-parity` is a
@@ -306,10 +315,13 @@ describe("CP-2379 outline_doc_create round-trip trim (AC3)", () => {
     expect(JSON.stringify(details.document)).not.toContain(
       "Server-returned body that must be trimmed",
     );
-    // The agent's input args can legitimately appear in `request` (that's
-    // the existing wire contract for debugging). That's input, not a
-    // server round-trip.
-    expect(details.request.text).toContain("Agent input body");
+    // CP-2395: response `request` is also trimmed — the agent's own input
+    // body MUST NOT round-trip back into the toolResult. Only {title} is
+    // preserved (input breadcrumb, nav-level).
+    expect(details.request).toEqual({ title: "Brand new" });
+    expect(details.request).not.toHaveProperty("text");
+    expect(details.request).not.toHaveProperty("collectionId");
+    expect(JSON.stringify(details.request)).not.toContain("Agent input body");
     // But summary + nav metadata are preserved.
     expect(details.summary).toMatchObject({
       id: "new-doc",
@@ -346,6 +358,8 @@ describe("CP-2379 outline_doc_create round-trip trim (AC3)", () => {
 
     expect(cliDetails.document).toEqual(mcpDetails.document);
     expect(cliDetails.summary).toEqual(mcpDetails.summary);
+    // CP-2395: byte-for-byte parity on the trimmed `request` shape.
+    expect(cliDetails.request).toEqual(mcpDetails.request);
   });
 });
 
@@ -381,9 +395,12 @@ describe("CP-2379 outline_doc_update round-trip trim (AC3)", () => {
     expect(JSON.stringify(details.document)).not.toContain(
       "Server-returned body that must be trimmed",
     );
-    // Input echo in `request` is the existing wire contract (input, not
-    // server round-trip) — preserved for debugging.
-    expect(details.request.text).toContain("Agent input body");
+    // CP-2395: response `request` is also trimmed — the agent's own input
+    // body MUST NOT round-trip back. Only {id, title} preserved (nav-level
+    // breadcrumb).
+    expect(details.request).toEqual({ id: "doc-id", title: "Updated title" });
+    expect(details.request).not.toHaveProperty("text");
+    expect(JSON.stringify(details.request)).not.toContain("Agent input body");
     // Summary + nav metadata preserved.
     expect(details.summary).toMatchObject({
       id: "doc-id",
@@ -418,6 +435,8 @@ describe("CP-2379 outline_doc_update round-trip trim (AC3)", () => {
 
     expect(cliDetails.document).toEqual(mcpDetails.document);
     expect(cliDetails.summary).toEqual(mcpDetails.summary);
+    // CP-2395: byte-for-byte parity on the trimmed `request` shape.
+    expect(cliDetails.request).toEqual(mcpDetails.request);
   });
 });
 
@@ -437,5 +456,140 @@ describe("CP-2379 outline_doc_get still returns full body (regression — non-go
 
     expect(details.document).toHaveProperty("text");
     expect(details.document.text).toContain("trimmed from search");
+  });
+});
+
+describe("CP-2395 request-echo trim helpers (AC1/AC2 — text MUST NOT round-trip)", () => {
+  test("trimCreateRequest keeps only {title}, drops text + all heavy fields", () => {
+    const trimmed = trimCreateRequest({
+      title: "Brand new",
+      text: "Full markdown body — this MUST NOT round-trip back",
+      collectionId: "collection-id",
+      publish: true,
+      parentDocumentId: "parent-id",
+    }) as Record<string, unknown>;
+
+    expect(trimmed).toEqual({ title: "Brand new" });
+    expect(trimmed).not.toHaveProperty("text");
+    expect(trimmed).not.toHaveProperty("collectionId");
+    expect(trimmed).not.toHaveProperty("publish");
+    expect(trimmed).not.toHaveProperty("parentDocumentId");
+    expect(JSON.stringify(trimmed)).not.toContain("Full markdown body");
+  });
+
+  test("trimUpdateRequest keeps {id, title?}, drops text + all heavy fields", () => {
+    const withTitle = trimUpdateRequest({
+      id: "doc-id",
+      title: "Updated title",
+      text: "Full markdown body — this MUST NOT round-trip back",
+      editMode: "replace",
+      publish: false,
+    }) as Record<string, unknown>;
+
+    expect(withTitle).toEqual({ id: "doc-id", title: "Updated title" });
+    expect(withTitle).not.toHaveProperty("text");
+    expect(withTitle).not.toHaveProperty("editMode");
+    expect(withTitle).not.toHaveProperty("publish");
+    expect(JSON.stringify(withTitle)).not.toContain("Full markdown body");
+
+    const titleOnly = trimUpdateRequest({
+      id: "doc-id",
+      text: "Full markdown body — this MUST NOT round-trip back",
+      editMode: "replace",
+    }) as Record<string, unknown>;
+
+    expect(titleOnly).toEqual({ id: "doc-id" });
+    expect(titleOnly).not.toHaveProperty("text");
+    expect(titleOnly).not.toHaveProperty("editMode");
+  });
+
+  test("trimCreateRequest / trimUpdateRequest are defensive on nullish input", () => {
+    expect(trimCreateRequest(null)).toEqual({});
+    expect(trimCreateRequest(undefined)).toEqual({});
+    expect(trimCreateRequest("string")).toEqual({});
+    expect(trimCreateRequest(42)).toEqual({});
+    expect(trimUpdateRequest(null)).toEqual({});
+    expect(trimUpdateRequest(undefined)).toEqual({});
+  });
+});
+
+describe("CP-2395 MCP ↔ CLI byte-for-byte parity on trimmed `request`", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("doc_create request shape matches between MCP and CLI", async () => {
+    const created = fullDoc({ id: "new-doc", title: "Brand new" });
+    const mcpFetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ data: created }))
+      .mockResolvedValueOnce(jsonResponse({ data: created }));
+    vi.stubGlobal("fetch", mcpFetch);
+    const mcpTool = getMcpTool("outline_doc_create");
+    const mcpResult = await mcpTool.execute("test-call-id", {
+      title: "Brand new",
+      text: "agent-input-body-must-not-round-trip",
+      collectionId: "c1",
+      publish: true,
+    });
+    const mcpDetails = JSON.parse(mcpResult.content[0].text).details;
+
+    const cliFetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ data: created }))
+      .mockResolvedValueOnce(jsonResponse({ data: created }));
+    vi.stubGlobal("fetch", cliFetch);
+    const cliResult: any = await dispatchDoc(
+      "create",
+      {
+        title: "Brand new",
+        text: "agent-input-body-must-not-round-trip",
+        collectionId: "c1",
+        publish: true,
+      },
+      cfg,
+    );
+    const cliDetails = JSON.parse(cliResult.content[0].text);
+
+    // Byte-for-byte parity on `request` after CP-2395 trim.
+    expect(cliDetails.request).toEqual(mcpDetails.request);
+    // Reverse: the agent's input body MUST NOT leak into either response.
+    expect(JSON.stringify(mcpDetails.request)).not.toContain("agent-input-body-must-not-round-trip");
+    expect(JSON.stringify(cliDetails.request)).not.toContain("agent-input-body-must-not-round-trip");
+  });
+
+  test("doc_update request shape matches between MCP and CLI", async () => {
+    const updated = fullDoc({ id: "doc-id", title: "Updated title" });
+    const mcpFetch = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    vi.stubGlobal("fetch", mcpFetch);
+    const mcpTool = getMcpTool("outline_doc_update");
+    const mcpResult = await mcpTool.execute("test-call-id", {
+      id: "doc-id",
+      title: "Updated title",
+      text: "agent-input-body-must-not-round-trip",
+      editMode: "replace",
+    });
+    const mcpDetails = JSON.parse(mcpResult.content[0].text).details;
+
+    const cliFetch = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    vi.stubGlobal("fetch", cliFetch);
+    const cliResult: any = await dispatchDoc(
+      "update",
+      {
+        id: "doc-id",
+        title: "Updated title",
+        text: "agent-input-body-must-not-round-trip",
+        editMode: "replace",
+      },
+      cfg,
+    );
+    const cliDetails = JSON.parse(cliResult.content[0].text);
+
+    // Byte-for-byte parity on `request` after CP-2395 trim.
+    expect(cliDetails.request).toEqual(mcpDetails.request);
+    expect(cliDetails.request).toEqual({ id: "doc-id", title: "Updated title" });
+    // Reverse: the agent's input body MUST NOT leak into either response.
+    expect(JSON.stringify(mcpDetails.request)).not.toContain("agent-input-body-must-not-round-trip");
+    expect(JSON.stringify(cliDetails.request)).not.toContain("agent-input-body-must-not-round-trip");
   });
 });

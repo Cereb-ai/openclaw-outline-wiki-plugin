@@ -276,7 +276,10 @@ async function dispatchDoc(
       return textResult({
         ok: true,
         method: "documents.create",
-        request: body,
+        // CP-2395: trim request echo too — mirror src/index.ts
+        // `trimCreateRequest`. Keeps MCP ↔ CLI byte-for-byte identical on
+        // `request` shape (CP-2060 parity contract).
+        request: trimCreateRequest(body),
         document: created ? trimDocBody(created) : null,
         summary: created
           ? {
@@ -333,7 +336,9 @@ async function dispatchDoc(
             return textResult({
               error: `documents.update changelog write failed with strictChangelog=true: ${cl.warning}`,
               method: "documents.update",
-              request: body,
+              // CP-2395: trim request echo too — same parity rationale as
+              // the ok path. Mirror src/index.ts `trimUpdateRequest`.
+              request: trimUpdateRequest(body),
               // CP-2379: trim body on the strict-error path too.
               document: updated ? trimDocBody(updated) : null,
             });
@@ -345,7 +350,9 @@ async function dispatchDoc(
       return textResult({
         ok: true,
         method: "documents.update",
-        request: body,
+        // CP-2395: trim request echo too — mirror src/index.ts
+        // `trimUpdateRequest`. Keeps MCP ↔ CLI byte-for-byte identical.
+        request: trimUpdateRequest(body),
         // CP-2379: round-trip trim — see doc.create for the rationale.
         // Matches the MCP path's `document` shape post-trim.
         document: updated ? trimDocBody(updated) : null,
@@ -693,6 +700,24 @@ function trimSearchHit(hit) {
   };
 }
 
+// CP-2395: request-echo trim helpers — mirror src/index.ts
+// `trimCreateRequest` / `trimUpdateRequest` so the CLI and MCP tool produce
+// byte-for-byte identical `request` shapes (CP-2060 parity contract).
+// Strip the full markdown body (`text`) plus other heavy input fields
+// (`collectionId`, `parentDocumentId`, `publish`, `editMode`) — keep only
+// the nav-level breadcrumb: {title} for create, {id[, title]} for update.
+function trimCreateRequest(body) {
+  if (!body || typeof body !== "object") return {};
+  return { title: body.title };
+}
+
+function trimUpdateRequest(body) {
+  if (!body || typeof body !== "object") return {};
+  const out = { id: body.id };
+  if (typeof body.title === "string") out.title = body.title;
+  return out;
+}
+
 // Mirrors index.ts verifyCreatedDocument: confirm data.id via documents.info.
 async function verifyCreatedDocument(
   cfg: { apiToken: string; endpoint: string },
@@ -838,6 +863,8 @@ export {
   pickNumber,
   trimDocBody,
   trimSearchHit,
+  trimCreateRequest,
+  trimUpdateRequest,
   verifyCreatedDocument,
   writeChangelog,
   textResult,

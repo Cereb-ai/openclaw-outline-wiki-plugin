@@ -116,6 +116,14 @@ describe("outline_doc_update", () => {
     expect(JSON.stringify(details)).not.toContain(
       "New body that the trim should drop",
     );
+    // CP-2395: response `request` is also trimmed — only {id, title} (no
+    // `text`, no `editMode`, no `publish`). The agent's full input body
+    // MUST NOT round-trip; otherwise the trim on `document` is undercut
+    // by an even bigger echo right next to it.
+    expect(details.request).toEqual({ id: "doc-id", title: "Updated title" });
+    expect(details.request).not.toHaveProperty("text");
+    expect(details.request).not.toHaveProperty("editMode");
+    expect(details.request).not.toHaveProperty("publish");
   });
 
   test.each([
@@ -177,5 +185,10 @@ describe("outline_doc_update", () => {
     expect(JSON.stringify(details)).not.toContain(
       "Body that must not round-trip",
     );
+    // CP-2395: error path also trims the request — only {id, title}.
+    expect(details.request).toEqual({ id: "doc-id", title: "Updated title" });
+    expect(details.request).not.toHaveProperty("text");
+    expect(details.request).not.toHaveProperty("changelog");
+    expect(details.request).not.toHaveProperty("strictChangelog");
   });
 });
