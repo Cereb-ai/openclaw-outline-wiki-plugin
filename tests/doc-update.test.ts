@@ -68,6 +68,10 @@ describe("outline_doc_update", () => {
       urlId: "doc-id",
       revision: 2,
       updatedAt: "2026-07-18T08:00:00.000Z",
+      // CP-2379: outline also returns `text` + metadata on update — they
+      // MUST be stripped from the response.
+      text: "# Updated title\n\nNew body that the trim should drop.",
+      collectionId: "collection-id",
     };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
     vi.stubGlobal("fetch", fetchMock);
@@ -90,8 +94,28 @@ describe("outline_doc_update", () => {
     expect(details).toMatchObject({
       ok: true,
       method: "documents.update",
-      document: updated,
+      document: {
+        id: "doc-id",
+        title: "Updated title",
+        url: "https://outline.example.test/doc/doc-id",
+        urlId: "doc-id",
+        collectionId: "collection-id",
+        updatedAt: "2026-07-18T08:00:00.000Z",
+      },
+      summary: {
+        id: "doc-id",
+        title: "Updated title",
+        url: "https://outline.example.test/doc/doc-id",
+        urlId: "doc-id",
+        revision: 2,
+        updatedAt: "2026-07-18T08:00:00.000Z",
+      },
     });
+    // CP-2379: full body MUST NOT round-trip back.
+    expect(details.document).not.toHaveProperty("text");
+    expect(JSON.stringify(details)).not.toContain(
+      "New body that the trim should drop",
+    );
   });
 
   test.each([
@@ -121,7 +145,15 @@ describe("outline_doc_update", () => {
   });
 
   test("returns an error when strictChangelog=true and changelog write fails", async () => {
-    const updated = { id: "doc-id", title: "Updated title" };
+    const updated = {
+      id: "doc-id",
+      title: "Updated title",
+      url: "https://outline.example.test/doc/doc-id",
+      urlId: "doc-id",
+      // CP-2379: include `text` so we can assert it gets trimmed even on
+      // the strict-error path.
+      text: "# Updated title\n\nBody that must not round-trip.",
+    };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ data: updated }))
@@ -140,5 +172,10 @@ describe("outline_doc_update", () => {
     expect(details.error).toContain("strictChangelog=true");
     expect(details).not.toHaveProperty("ok", true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // CP-2379: error path also trims the document — no `text` round-trip.
+    expect(details.document).not.toHaveProperty("text");
+    expect(JSON.stringify(details)).not.toContain(
+      "Body that must not round-trip",
+    );
   });
 });

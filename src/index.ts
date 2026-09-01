@@ -9,19 +9,26 @@
  * category.method (no more `{category, method, args}` envelope).
  *
  * Tool inventory (13):
- *   - outline_doc_list           — list documents (returns text in payload)
+ *   - outline_doc_list           — list documents (metadata only — `text` stripped, see CP-2379)
  *   - outline_doc_get            — single document + full markdown body
- *   - outline_doc_create         — create a new document (publish=true default; accepts parentDocumentId)
- *   - outline_doc_update         — update text/title. **parentDocumentId is rejected** (0.4.0 inherits 0.3.1 fail-fast — use outline_doc_move). Optional `changelog` writes a revision name (best-effort).
+ *   - outline_doc_create         — create a new document (publish=true default; accepts parentDocumentId; response echoes summary only — no `document.text` round-trip)
+ *   - outline_doc_update         — update text/title. **parentDocumentId is rejected** (0.4.0 inherits 0.3.1 fail-fast — use outline_doc_move). Optional `changelog` writes a revision name (best-effort). Response echoes summary only — no `document.text` round-trip.
  *   - outline_doc_delete         — trash (default) or hard-delete (permanent=true)
  *   - outline_doc_archive        — move to archive
  *   - outline_doc_restore        — restore from archive
  *   - outline_doc_move           — move document to another collection (accepts parentDocumentId)
- *   - outline_search_query       — full-text search
+ *   - outline_search_query       — full-text search (per-hit `document.text` stripped — keep ranking/context + nav metadata)
  *   - outline_collection_list    — list all collections
  *   - outline_collection_documents — list documents in a collection
  *   - outline_rev_log            — revision metadata (name/timestamp/author) for a document (no body text)
  *   - outline_attachment_upload  — upload via S3 presigned POST (url OR local path)
+ *
+ * Response-trimming contract (CP-2379, master 2026-09-01+): search / list /
+ * create / update responses no longer round-trip full document bodies.
+ * Callers that need the body MUST call `outline_doc_get {id}` explicitly.
+ * This is a planner-token optimization (toolResult accounts for 77-86% of
+ * per-task token spend — see CP-2378). The trim is uniform across the
+ * shared handler so the CLI (`outline-tool`) inherits the same shape.
  *
  * Source-of-truth for the priority list: cereb-pilot (the heaviest user of
  * this plugin). Method set is intentionally narrow; each new method lands
@@ -93,7 +100,7 @@ export default defineToolPlugin({
       name: "outline_doc_list",
       label: "Outline List Documents",
       description:
-        "List documents in outline (already returns `text` field in payload). Optional filters: `limit` (default 25), `offset`, `collectionId` (UUID), `query` (substring match on title). Calls `documents.list`.",
+        "List documents in outline. Response contains metadata only — `text` (markdown body) is stripped from every document to keep toolResult payload small (CP-2379 planner-token fix: see `outline_doc_get` for the body). Optional filters: `limit` (default 25), `offset`, `collectionId` (UUID), `query` (substring match on title). Calls `documents.list`.",
       parameters: Type.Object({
         limit: Type.Optional(
           Type.Integer({
@@ -481,7 +488,15 @@ async function docList(
       ok: true,
       method: "documents.list",
       request: body,
-      documents: data?.data ?? [],
+      // CP-2379: strip the full markdown body (`text`) from every doc to
+      // shrink toolResult payload — outline's `documents.list` returns the
+      // complete body in `text`, which is overkill for a list view (use
+      // `outline_doc_get` to fetch a body). Metadata fields kept match the
+      // navigation set the agent needs to follow up with `outline_doc_get`
+      // / `outline_doc_move` / `outline_doc_update`.
+      documents: Array.isArray(data?.data)
+        ? data.data.map(trimDocBody)
+        : [],
       pagination: data?.pagination ?? null,
     });
   } catch (err) {
@@ -589,7 +604,12 @@ async function docCreate(
       ok: true,
       method: "documents.create",
       request: body,
-      document: created,
+      // CP-2379: round-trip trim — `document.text` is dropped from the
+      // response to avoid blasting the full markdown body back into the
+      // agent's toolResult (the agent just sent that body via `text`; it
+      // doesn't need to receive it again). `summary` below holds the
+      // navigation fields the agent needs to follow up.
+      document: created ? trimDocBody(created) : null,
       // Convenience summary so the agent does not have to re-read the full
       // document object to know "did it work, what id do I have now".
       summary: created
@@ -710,7 +730,9 @@ async function docUpdate(
             error: `documents.update changelog write failed with strictChangelog=true: ${changelogResult.warning}`,
             method: "documents.update",
             request: body,
-            document: updated,
+            // CP-2379: trim body on the strict-error path too — same
+            // rationale as the ok path (don't round-trip the markdown body).
+            document: updated ? trimDocBody(updated) : null,
           });
         }
         warnings.push(changelogResult.warning);
@@ -721,7 +743,10 @@ async function docUpdate(
       ok: true,
       method: "documents.update",
       request: body,
-      document: updated,
+      // CP-2379: round-trip trim — see docCreate for the rationale. The
+      // agent just sent `text`/`title`; it does not need to receive the
+      // post-update body back. `summary` carries the navigation fields.
+      document: updated ? trimDocBody(updated) : null,
       summary: updated
         ? {
             id: updated.id,
@@ -916,7 +941,17 @@ async function searchQuery(
       ok: true,
       method: "documents.search",
       request: body,
-      documents: data?.data ?? [],
+      // CP-2379: strip `document.text` (full markdown body) from each hit.
+      // outline's `documents.search` returns `{ranking, context, document}`
+      // where `document.text` is the full markdown — for a search hit that's
+      // a huge token blast (43k→~1k chars per call in the planner workload).
+      // We keep `ranking` + `context` (already a snippet, sibling of
+      // `document`) + the inner-document navigation set (same set as
+      // `outline_doc_list`: id / title / url / urlId / collectionId /
+      // updatedAt). Callers that need the body must call `outline_doc_get`.
+      documents: Array.isArray(data?.data)
+        ? data.data.map(trimSearchHit)
+        : [],
       pagination: data?.pagination ?? null,
     });
   } catch (err) {
@@ -1478,5 +1513,60 @@ function textResult(data: unknown): {
   return {
     content: [{ type: "text", text }],
     details: data,
+  };
+}
+
+// ===== CP-2379 response-trim helpers =====
+//
+// outline's REST responses frequently include the full markdown body in a
+// `text` field (`documents.list`, `documents.info`, `documents.search`,
+// `documents.create`, `documents.update`). For search/list/create/update
+// those bodies dominate the toolResult payload — at one planning workload,
+// a single `outline_search_query` (limit=3) returned ~50k chars because
+// every hit carried a 10k+ char body. We trim those bodies uniformly here
+// so the MCP and CLI callers share the same shape. The agent must call
+// `outline_doc_get` explicitly to fetch a body — that call is intentionally
+// left untouched (single-shot metadata + body, no second `documents.export`
+// round-trip) because fetching a body is the legitimate use case.
+//
+// Both helpers are pure / side-effect-free; tests can call them directly.
+
+// Navigation metadata kept on a trimmed document. Conservative: id +
+// title + url + urlId + collectionId + updatedAt cover every follow-up
+// call the agent would want to make (`outline_doc_get {id}`,
+// `outline_doc_update {id, ...}`, `outline_doc_move {id, ...}`, plus
+// opening the wiki URL). `text` is the only thing stripped.
+const TRIMMED_DOC_FIELDS = [
+  "id",
+  "title",
+  "url",
+  "urlId",
+  "collectionId",
+  "updatedAt",
+] as const;
+
+function trimDocBody(doc: unknown): Record<string, unknown> | null {
+  if (!doc || typeof doc !== "object") return null;
+  const out: Record<string, unknown> = {};
+  for (const key of TRIMMED_DOC_FIELDS) {
+    const v = (doc as Record<string, unknown>)[key];
+    if (v !== undefined) out[key] = v;
+  }
+  return out;
+}
+
+function trimSearchHit(hit: unknown): Record<string, unknown> | null {
+  if (!hit || typeof hit !== "object") return null;
+  const h = hit as Record<string, unknown>;
+  // search hit shape: {ranking, context, document: {...full doc w/ text...}}
+  // Keep `ranking` + `context` (snippet, sibling of `document`) and the
+  // trimmed inner document (same nav set as doc_list). `text` and all
+  // other heavy inner fields (`createdBy`, `updatedBy`, `tasks`,
+  // `collaboratorIds`, etc.) are dropped — the agent can `outline_doc_get`
+  // to fetch anything it needs beyond the nav fields.
+  return {
+    ranking: h.ranking,
+    context: h.context,
+    document: trimDocBody(h.document),
   };
 }

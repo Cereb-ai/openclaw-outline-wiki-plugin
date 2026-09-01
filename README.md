@@ -19,15 +19,15 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 
 | tool | purpose | required args |
 |---|---|---|
-| `outline_doc_list` | list documents (returns text in payload) | — |
+| `outline_doc_list` | list documents (metadata only — `text` stripped, see Response-trim contract below) | — |
 | `outline_doc_get` | single document + full markdown body | `id` |
-| `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`); `collectionId` falls back to `defaultCollectionId` config; verifies result via `documents.info` | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
-| `outline_doc_update` | update text / title (`editMode="replace"` default); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent) | `id` + (`text` or `title`) |
+| `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`); `collectionId` falls back to `defaultCollectionId` config; verifies result via `documents.info`; **response trims `document.text`** (CP-2379 — round-trip trim) | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
+| `outline_doc_update` | update text / title (`editMode="replace"` default); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent); **response trims `document.text`** (CP-2379 — round-trip trim) | `id` + (`text` or `title`) |
 | `outline_doc_delete` | trash (default) or hard-delete (`permanent: true`, requires already-trashed) | `id` |
 | `outline_doc_archive` | move to archive (admin-readable, recoverable) | `id` |
 | `outline_doc_restore` | restore from archive | `id` |
 | `outline_doc_move` | move to a different collection (accepts `parentDocumentId` to reparent in the same call) | `id`, `collectionId` |
-| `outline_search_query` | full-text search (limit default `25`, not `10`) | `query` |
+| `outline_search_query` | full-text search (limit default `25`, not `10`); **per-hit `document.text` stripped** (CP-2379) — keep ranking/context + nav metadata | `query` |
 | `outline_collection_list` | list all collections | — |
 | `outline_collection_documents` | list documents in a collection (includes children structure) | `id` (collection id) |
 | `outline_collection_create` | create collection (default `permission="read_write"`, `sharing=true`) | `name` |
@@ -36,6 +36,19 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 | `outline_rev_log` | revision metadata (name / timestamp / author) for a document | `documentId` |
 
 Per-tool argument schemas, the OpenClaw agent skill, and the 避坑清单 live in [`skills/outline-wiki/SKILL.md`](skills/outline-wiki/SKILL.md).
+
+## Response-trim contract (CP-2379)
+
+Four high-frequency handlers strip the full markdown body (`text`) from their toolResult payload to keep the planner token spend in check (toolResult accounts for 77-86% of per-task token cost on cereb-pilot — see CP-2378):
+
+- `outline_search_query` — per-hit `document.text` is stripped; keep `ranking` + `context` (already a snippet) + inner-document nav metadata (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`).
+- `outline_doc_list` — `text` is stripped from every doc; nav metadata preserved.
+- `outline_doc_create` / `outline_doc_update` — round-trip trim: the agent just sent the body via `text`, so it does NOT come back in `document.text`. Trimmed `document` (nav metadata) + the convenience `summary` (`id` / `title` / `url` / `urlId` / `revision` / `publishedAt` or `updatedAt`) are returned instead.
+- `outline_doc_get` is intentionally NOT trimmed — that's the canonical "fetch the body" call.
+
+The CLI (`outline-tool`) shares the same trim helpers (`trimDocBody` / `trimSearchHit` in `src/cli.ts`), so MCP and CLI byte-for-byte parity on response shape is preserved (`tests/cli-vs-mcp-parity.test.ts` + `tests/response-trim.test.ts` enforce this).
+
+Regression tests: `tests/response-trim.test.ts` — 14 cases asserting no `text` round-trips, MCP ↔ CLI parity on every trimmed handler.
 
 ## Installation
 
