@@ -67,21 +67,43 @@ outline-tool --help
 
 | Tool 名 | Outline method | 用途 | 必填参数 | 常用选填 |
 |---|---|---|---|---|
-| `outline_doc_list` | `documents.list` | 列文档 (含 text 字段) | — | `limit`, `offset`, `collectionId`, `query` |
+| `outline_doc_list` | `documents.list` | 列文档 (返回**裁剪版**, 仅 metadata, 不含 markdown 正文 — 见下文「返回格式裁剪」) | — | `limit`, `offset`, `collectionId`, `query` |
 | `outline_doc_get` | `documents.info` | 单文档 + metadata + markdown 正文 (单调用) | `id` | — |
-| `outline_doc_create` | `documents.create` | 创建文档 (publish=true 默认) | `title`, `text`, `collectionId` (可走 cfg `defaultCollectionId`) | `publish`, `parentDocumentId` (挂到父文档下) |
-| `outline_doc_update` | `documents.update` | 更新 text / title (`editMode=replace` 默认). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent) | `id` + (`text` / `title` 之一) | `editMode`, `publish`, `changelog` |
+| `outline_doc_create` | `documents.create` | 创建文档 (publish=true 默认). **返回裁剪**: 不回 document.text 全文, 只回 nav metadata + summary | `title`, `text`, `collectionId` (可走 cfg `defaultCollectionId`) | `publish`, `parentDocumentId` (挂到父文档下) |
+| `outline_doc_update` | `documents.update` | 更新 text / title (`editMode=replace` 默认). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent). **返回裁剪**: 不回 document.text 全文, 只回 nav metadata + summary | `id` + (`text` / `title` 之一) | `editMode`, `publish`, `changelog` |
 | `outline_doc_delete` | `documents.delete` | trash (default) / 硬删 (`permanent: true`) | `id` | `permanent` |
 | `outline_doc_archive` | `documents.archive` | 归档 (admin 可读, 可 restore) | `id` | — |
 | `outline_doc_restore` | `documents.restore` | 从 archive 恢复 | `id` | — |
 | `outline_doc_move` | `documents.move` | 移到其他 collection (可同时 reparent) | `id`, `collectionId` | `parentDocumentId` (在 collection 内 reparent 到某个父文档) |
-| `outline_search_query` | `documents.search` | 全文搜索文档 | `query` | `limit`, `offset`, `collectionId` |
+| `outline_search_query` | `documents.search` | 全文搜索文档. **返回裁剪**: 每条 hit 的 `document.text` 已剥离, 仅保留 ranking + context + nav metadata (id/title/url/urlId/collectionId/updatedAt) | `query` | `limit`, `offset`, `collectionId` |
 | `outline_collection_list` | `collections.list` | 列所有 collection | — | `limit`, `offset` |
 | `outline_collection_documents` | `collections.documents` | 列 collection 下文档 (含 children 结构) | `id` (collection id) | `limit`, `offset` |
 | `outline_collection_create` | `collections.create` | 新建 collection (permission 默认 `read_write`, sharing 默认 true) | `name` | `description`, `icon`, `color`, `permission`, `sharing` |
 | `outline_collection_update` | `collections.update` | 改 collection 字段 | `id` + (name/description/icon/color/permission/sharing 至少一项) | — |
 | `outline_attachment_upload` | `attachments.create` / `attachments.createFromUrl` | URL 模式 (server-side fetch) / 本地文件模式 (S3 预签 POST) | `name` + (`url` 或 `path`) | `contentType`, `size`, `documentId`, `preset` |
 | `outline_rev_log` | `revisions.list` | 文档修改记录 (name / timestamp / author, 不含正文) | `documentId` | `limit` (default 5, max 20) |
+
+---
+
+## 返回格式裁剪 (CP-2379)
+
+> **从 master @ 6ca0328 之后生效**: 4 个高频 handler (`outline_search_query` / `outline_doc_list` / `outline_doc_create` / `outline_doc_update`) 不再在响应里回显 markdown 正文 (`text` 字段). 这是 planner token 优化 (toolResult 占单任务 token 消耗的 77-86% — 详见 CP-2378).
+
+**裁剪范围**:
+- `outline_search_query` 返回的每条 hit: `document.text` 剥离, **保留** `ranking` / `context` (已是 snippet) + 内部 `document` 裁剪为 nav 元数据 (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`)
+- `outline_doc_list` 返回的每篇 doc: `text` 剥离, 仅保留 nav 元数据 (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`)
+- `outline_doc_create` / `outline_doc_update` 返回: 不再回 `document.text` 全文 (agent 刚把 body 发进来, 不需要再回), 改为回裁剪后的 `document` (nav 元数据) + 现有 `summary` (id/title/url/urlId/revision/...). `request` 字段保留 input args echo (用于调试).
+
+**为什么裁剪**:
+- 实测单次 `outline_search_query limit=3` 命中 3 篇 doc, 每篇 text 10k+ 字符, toolResult **~50k 字符**. 裁剪后 ~1k 字符量级.
+- `outline_doc_get` 全文读取**不受影响** — 仍是 metadata + markdown 正文 (单调用 `documents.info`), 这是「读正文」的合法路径.
+- CLI (`outline-tool`) 共享同一份 trim helper (`src/cli.ts` 的 `trimDocBody` / `trimSearchHit`), 两条路径响应 byte-for-byte 一致.
+
+**调用方影响**:
+- 拿到 hit id 后, 想读正文就调 `outline_doc_get {id}` (一次往返拿 metadata + body).
+- 不需要正文就别调 (列表/搜索就够了 — nav 元数据足够做 find + open).
+
+**反断言 (回归保护)**: `tests/response-trim.test.ts` 14 条 case 断言裁剪后 **任何** 路径下都不带 `text`, MCP ↔ CLI byte-for-byte 一致; `outline_doc_get` 不变 (仍带 text).
 
 ---
 

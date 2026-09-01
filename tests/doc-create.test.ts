@@ -80,6 +80,13 @@ describe("outline_doc_create response validation", () => {
       urlId: "doc-id",
       revision: 1,
       publishedAt: "2026-07-18T07:00:00.000Z",
+      // Outline also returns a body (`text`) and metadata that we strip on
+      // the response (CP-2379 round-trip trim). They're included here to
+      // confirm the trim actually drops them — they MUST NOT leak into
+      // the response after the trim.
+      text: "# Created from test\n\nFull body that the trim should drop.",
+      collectionId: "collection-id",
+      updatedAt: "2026-07-18T07:00:00.000Z",
     };
     const fetchMock = vi
       .fn()
@@ -92,10 +99,18 @@ describe("outline_doc_create response validation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ id: "doc-id" });
     const details = unwrapDetails(result);
+    // CP-2379: response `document` is trimmed — only nav fields, no `text`.
     expect(details).toMatchObject({
       ok: true,
       method: "documents.create",
-      document: created,
+      document: {
+        id: "doc-id",
+        title: "Created from test",
+        url: "https://outline.example.test/doc/doc-id",
+        urlId: "doc-id",
+        collectionId: "collection-id",
+        updatedAt: "2026-07-18T07:00:00.000Z",
+      },
       summary: {
         id: "doc-id",
         title: "Created from test",
@@ -105,5 +120,9 @@ describe("outline_doc_create response validation", () => {
         publishedAt: "2026-07-18T07:00:00.000Z",
       },
     });
+    // CP-2379: the full markdown body MUST NOT round-trip back into the
+    // agent's toolResult (the agent just sent it via `text`).
+    expect(details.document).not.toHaveProperty("text");
+    expect(JSON.stringify(details)).not.toContain("Full body that the trim should drop");
   });
 });

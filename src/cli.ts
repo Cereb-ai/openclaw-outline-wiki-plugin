@@ -196,7 +196,10 @@ async function dispatchDoc(
   switch (method) {
     case "list": {
       // Mirror index.ts docList: pickNumber → finite-number or 25 default.
-      const body = { limit: pickNumber(args.limit, 25), offset: pickNumber(args.offset, 0) };
+      const body: Record<string, unknown> = {
+        limit: pickNumber(args.limit, 25),
+        offset: pickNumber(args.offset, 0),
+      };
       if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
       if (typeof args.query === "string") body.query = args.query;
       let data;
@@ -205,7 +208,15 @@ async function dispatchDoc(
       } catch (err) {
         return textResult({ error: `documents.list failed: ${(err).message}` });
       }
-      return textResult({ ok: true, method: "documents.list", documents: data?.data ?? [], pagination: data?.pagination ?? null });
+      // CP-2379: strip `text` (full markdown body) from every doc — see
+      // trimDocBody in src/index.ts. CLI parity with the MCP tool.
+      return textResult({
+        ok: true,
+        method: "documents.list",
+        request: body,
+        documents: Array.isArray(data?.data) ? data.data.map(trimDocBody) : [],
+        pagination: data?.pagination ?? null,
+      });
     }
     case "get": {
       if (typeof args.id !== "string") return textResult({ error: "doc.get requires a non-empty `id` (string)" });
@@ -258,7 +269,26 @@ async function dispatchDoc(
           error: `documents.create verify failed for id "${createdId}": ${(err).message}`,
         });
       }
-      return textResult({ ok: true, method: "documents.create", document: created });
+      // CP-2379: round-trip trim — don't echo the full markdown body. The
+      // agent just sent `text`; it doesn't need to receive it back. Keep
+      // the trimmed document for navigation (matches the MCP path's
+      // `document` shape post-trim; `summary` is the convenience subset).
+      return textResult({
+        ok: true,
+        method: "documents.create",
+        request: body,
+        document: created ? trimDocBody(created) : null,
+        summary: created
+          ? {
+              id: created.id,
+              title: created.title,
+              url: created.url,
+              urlId: created.urlId,
+              revision: created.revision,
+              publishedAt: created.publishedAt ?? null,
+            }
+          : null,
+      });
     }
     case "update": {
       if (typeof args.id !== "string" || args.id.length === 0) {
@@ -304,7 +334,8 @@ async function dispatchDoc(
               error: `documents.update changelog write failed with strictChangelog=true: ${cl.warning}`,
               method: "documents.update",
               request: body,
-              document: updated,
+              // CP-2379: trim body on the strict-error path too.
+              document: updated ? trimDocBody(updated) : null,
             });
           }
           warnings.push(cl.warning);
@@ -315,7 +346,19 @@ async function dispatchDoc(
         ok: true,
         method: "documents.update",
         request: body,
-        document: updated,
+        // CP-2379: round-trip trim — see doc.create for the rationale.
+        // Matches the MCP path's `document` shape post-trim.
+        document: updated ? trimDocBody(updated) : null,
+        summary: updated
+          ? {
+              id: updated.id,
+              title: updated.title,
+              url: updated.url,
+              urlId: updated.urlId,
+              revision: updated.revision,
+              updatedAt: updated.updatedAt ?? null,
+            }
+          : null,
         warnings: warnings.length > 0 ? warnings : undefined,
       });
     }
@@ -422,7 +465,7 @@ async function dispatchSearch(
     return textResult({ error: "search.query requires a non-empty `query` (string)" });
   }
   // Mirror index.ts searchQuery: limit default = 25 (not 10), via pickNumber helper.
-  const body = {
+  const body: Record<string, unknown> = {
     query: args.query,
     limit: pickNumber(args.limit, 25),
     offset: pickNumber(args.offset, 0),
@@ -434,7 +477,15 @@ async function dispatchSearch(
   } catch (err) {
     return textResult({ error: `documents.search failed: ${(err).message}` });
   }
-  return textResult({ ok: true, method: "documents.search", documents: data?.data ?? [], pagination: data?.pagination ?? null });
+  // CP-2379: strip `document.text` from each hit — see trimSearchHit in
+  // src/index.ts. CLI parity with the MCP tool.
+  return textResult({
+    ok: true,
+    method: "documents.search",
+    request: body,
+    documents: Array.isArray(data?.data) ? data.data.map(trimSearchHit) : [],
+    pagination: data?.pagination ?? null,
+  });
 }
 
 async function dispatchAttachment(
@@ -617,6 +668,31 @@ function pickNumber(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
+// CP-2379 trim helpers — mirror src/index.ts `trimDocBody` / `trimSearchHit`
+// so the CLI and MCP tool produce byte-for-byte identical response shapes.
+// Navigation metadata kept: id, title, url, urlId, collectionId, updatedAt.
+// `text` (full markdown body) is the only field stripped.
+const TRIMMED_DOC_FIELDS = ["id", "title", "url", "urlId", "collectionId", "updatedAt"];
+
+function trimDocBody(doc) {
+  if (!doc || typeof doc !== "object") return null;
+  const out = {};
+  for (const key of TRIMMED_DOC_FIELDS) {
+    const v = doc[key];
+    if (v !== undefined) out[key] = v;
+  }
+  return out;
+}
+
+function trimSearchHit(hit) {
+  if (!hit || typeof hit !== "object") return null;
+  return {
+    ranking: hit.ranking,
+    context: hit.context,
+    document: trimDocBody(hit.document),
+  };
+}
+
 // Mirrors index.ts verifyCreatedDocument: confirm data.id via documents.info.
 async function verifyCreatedDocument(
   cfg: { apiToken: string; endpoint: string },
@@ -760,6 +836,8 @@ export {
   dispatchAttachment,
   outlineFetch,
   pickNumber,
+  trimDocBody,
+  trimSearchHit,
   verifyCreatedDocument,
   writeChangelog,
   textResult,
