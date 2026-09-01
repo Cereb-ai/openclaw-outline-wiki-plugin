@@ -603,7 +603,12 @@ async function docCreate(
     return textResult({
       ok: true,
       method: "documents.create",
-      request: body,
+      // CP-2395: round-trip trim — `request` used to echo `body` (which
+      // includes the full markdown body under `text`). Strip everything
+      // except `{title}` so the agent doesn't see its own input round-trip
+      // back. The server-returned document was already trimmed by CP-2379
+      // via `trimDocBody(created)` below.
+      request: trimCreateRequest(body),
       // CP-2379: round-trip trim — `document.text` is dropped from the
       // response to avoid blasting the full markdown body back into the
       // agent's toolResult (the agent just sent that body via `text`; it
@@ -729,7 +734,9 @@ async function docUpdate(
           return textResult({
             error: `documents.update changelog write failed with strictChangelog=true: ${changelogResult.warning}`,
             method: "documents.update",
-            request: body,
+            // CP-2395: trim body on the strict-error path too — same
+            // rationale as the ok path (don't round-trip the markdown body).
+            request: trimUpdateRequest(body),
             // CP-2379: trim body on the strict-error path too — same
             // rationale as the ok path (don't round-trip the markdown body).
             document: updated ? trimDocBody(updated) : null,
@@ -742,7 +749,12 @@ async function docUpdate(
     return textResult({
       ok: true,
       method: "documents.update",
-      request: body,
+      // CP-2395: round-trip trim — `request` used to echo `body` (which
+      // includes the full markdown body under `text`). Strip everything
+      // except `{id, title}` (title only when the caller passed it in the
+      // update — same shape as docCreate). The server-returned document
+      // was already trimmed by CP-2379 via `trimDocBody(updated)` below.
+      request: trimUpdateRequest(body),
       // CP-2379: round-trip trim — see docCreate for the rationale. The
       // agent just sent `text`/`title`; it does not need to receive the
       // post-update body back. `summary` carries the navigation fields.
@@ -1552,6 +1564,39 @@ function trimDocBody(doc: unknown): Record<string, unknown> | null {
     const v = (doc as Record<string, unknown>)[key];
     if (v !== undefined) out[key] = v;
   }
+  return out;
+}
+
+// ===== CP-2395 request-echo trim helpers =====
+//
+// CP-2379 trimmed the SERVER response (dropping `document.text`), but the
+// response's `request` field was still echoing the agent's INPUT body —
+// which contains the full markdown body the agent just sent via `text`.
+// Round-tripping that defeats the whole point of CP-2379 (planner token
+// burn from toolResult echoing the agent's own input back at it).
+//
+// These helpers strip `text` (and the rest of the heavy fields —
+// `collectionId`, `parentDocumentId`, `publish`, `editMode`) so the
+// response only carries the nav-level fields. Kept deliberately tiny:
+// {title} for create (the agent already knows the title it sent), and
+// {id, title} for update (id is required to address the doc, title only
+// when the caller actually changed it). `summary` below already exposes
+// the same nav metadata post-write, so `request` is just a debugging
+// breadcrumb — keeping it tiny is fine.
+
+function trimCreateRequest(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object") return {};
+  const b = body as Record<string, unknown>;
+  return {
+    title: b.title,
+  };
+}
+
+function trimUpdateRequest(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object") return {};
+  const b = body as Record<string, unknown>;
+  const out: Record<string, unknown> = { id: b.id };
+  if (typeof b.title === "string") out.title = b.title;
   return out;
 }
 

@@ -69,8 +69,8 @@ outline-tool --help
 |---|---|---|---|---|
 | `outline_doc_list` | `documents.list` | 列文档 (返回**裁剪版**, 仅 metadata, 不含 markdown 正文 — 见下文「返回格式裁剪」) | — | `limit`, `offset`, `collectionId`, `query` |
 | `outline_doc_get` | `documents.info` | 单文档 + metadata + markdown 正文 (单调用) | `id` | — |
-| `outline_doc_create` | `documents.create` | 创建文档 (publish=true 默认). **返回裁剪**: 不回 document.text 全文, 只回 nav metadata + summary | `title`, `text`, `collectionId` (可走 cfg `defaultCollectionId`) | `publish`, `parentDocumentId` (挂到父文档下) |
-| `outline_doc_update` | `documents.update` | 更新 text / title (`editMode=replace` 默认). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent). **返回裁剪**: 不回 document.text 全文, 只回 nav metadata + summary | `id` + (`text` / `title` 之一) | `editMode`, `publish`, `changelog` |
+| `outline_doc_create` | `documents.create` | 创建文档 (publish=true 默认). **返回裁剪** (CP-2379 + CP-2395): 不回 `document.text` 全文, 只回 nav metadata + summary; `request` 字段也裁剪为 `{title}` (不回 input body 全文) | `title`, `text`, `collectionId` (可走 cfg `defaultCollectionId`) | `publish`, `parentDocumentId` (挂到父文档下) |
+| `outline_doc_update` | `documents.update` | 更新 text / title (`editMode=replace` 默认). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent). **返回裁剪** (CP-2379 + CP-2395): 不回 `document.text` 全文, 只回 nav metadata + summary; `request` 字段也裁剪为 `{id[, title]}` (不回 input body 全文, 含严格错误路径) | `id` + (`text` / `title` 之一) | `editMode`, `publish`, `changelog` |
 | `outline_doc_delete` | `documents.delete` | trash (default) / 硬删 (`permanent: true`) | `id` | `permanent` |
 | `outline_doc_archive` | `documents.archive` | 归档 (admin 可读, 可 restore) | `id` | — |
 | `outline_doc_restore` | `documents.restore` | 从 archive 恢复 | `id` | — |
@@ -85,25 +85,40 @@ outline-tool --help
 
 ---
 
-## 返回格式裁剪 (CP-2379)
+## 返回格式裁剪 (CP-2379 + CP-2395)
 
 > **从 master @ 6ca0328 之后生效**: 4 个高频 handler (`outline_search_query` / `outline_doc_list` / `outline_doc_create` / `outline_doc_update`) 不再在响应里回显 markdown 正文 (`text` 字段). 这是 planner token 优化 (toolResult 占单任务 token 消耗的 77-86% — 详见 CP-2378).
+>
+> **CP-2395 补充**: `outline_doc_create` / `outline_doc_update` 的 `request` 字段也从「回显 input args 全文」裁剪为 nav 级别 (`{title}` / `{id, title}`) — 与 CP-2383 jira 插件回声裁剪保持一致, agent 刚把 body 发进来, 不需要再回.
 
 **裁剪范围**:
 - `outline_search_query` 返回的每条 hit: `document.text` 剥离, **保留** `ranking` / `context` (已是 snippet) + 内部 `document` 裁剪为 nav 元数据 (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`)
 - `outline_doc_list` 返回的每篇 doc: `text` 剥离, 仅保留 nav 元数据 (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`)
-- `outline_doc_create` / `outline_doc_update` 返回: 不再回 `document.text` 全文 (agent 刚把 body 发进来, 不需要再回), 改为回裁剪后的 `document` (nav 元数据) + 现有 `summary` (id/title/url/urlId/revision/...). `request` 字段保留 input args echo (用于调试).
+- `outline_doc_create` 返回:
+  - `request`: 裁剪为 `{title}` (仅 nav 级别 breadcrumb, 不回显 `text` / `collectionId` / `publish` / `parentDocumentId`)
+  - `document`: 裁剪为 nav 元数据 (`id` / `title` / `url` / `urlId` / `collectionId` / `updatedAt`) — agent 刚把 body 发进来, 不需要再回
+  - `summary`: 完整保留 (`id` / `title` / `url` / `urlId` / `revision` / `publishedAt`) — 用于导航
+- `outline_doc_update` 返回:
+  - `request`: 裁剪为 `{id}` / `{id, title}` (按调用方实际传入的字段; 不回显 `text` / `editMode` / `publish` / `changelog` / `strictChangelog`)
+  - `document`: 裁剪为 nav 元数据 (同上)
+  - `summary`: 完整保留 (`id` / `title` / `url` / `urlId` / `revision` / `updatedAt`) — 用于导航
+  - 严格错误路径 (`strictChangelog=true` + changelog 写失败): 同样裁剪 `request` / `document`, 不回显 markdown body
 
 **为什么裁剪**:
 - 实测单次 `outline_search_query limit=3` 命中 3 篇 doc, 每篇 text 10k+ 字符, toolResult **~50k 字符**. 裁剪后 ~1k 字符量级.
+- `outline_doc_create` / `outline_doc_update` 的「input body 全文回显」是同样量级的 token 黑洞 — agent 刚发出去的 markdown 又被原样打回来, 等于把整篇 body 在 toolResult 里再贴一遍. 裁掉 `request.text` 直接干掉这部分冗余.
 - `outline_doc_get` 全文读取**不受影响** — 仍是 metadata + markdown 正文 (单调用 `documents.info`), 这是「读正文」的合法路径.
-- CLI (`outline-tool`) 共享同一份 trim helper (`src/cli.ts` 的 `trimDocBody` / `trimSearchHit`), 两条路径响应 byte-for-byte 一致.
+- CLI (`outline-tool`) 共享同一份 trim helper (`src/cli.ts` 的 `trimDocBody` / `trimSearchHit` / `trimCreateRequest` / `trimUpdateRequest`), 两条路径响应 byte-for-byte 一致 (CP-2060 parity).
 
 **调用方影响**:
 - 拿到 hit id 后, 想读正文就调 `outline_doc_get {id}` (一次往返拿 metadata + body).
 - 不需要正文就别调 (列表/搜索就够了 — nav 元数据足够做 find + open).
+- `outline_doc_create` / `outline_doc_update` 后想确认调用本身, 用 `summary` (`id` / `revision`) 就够了, 不依赖 `request` 字段回显.
 
-**反断言 (回归保护)**: `tests/response-trim.test.ts` 14 条 case 断言裁剪后 **任何** 路径下都不带 `text`, MCP ↔ CLI byte-for-byte 一致; `outline_doc_get` 不变 (仍带 text).
+**反断言 (回归保护)**:
+- `tests/response-trim.test.ts`: 19 条 case 断言裁剪后 **任何** 路径下都不带 `text` (含 `request` / `document`), MCP ↔ CLI byte-for-byte 一致; `outline_doc_get` 不变 (仍带 text).
+- `tests/doc-create.test.ts` / `tests/doc-update.test.ts`: 断言 `request` 仅含 `{title}` / `{id, title}`, 不含 `text` (含严格错误路径).
+- `tests/cli-vs-mcp-parity.test.ts`: CP-2060 parity contract 覆盖 `request` 字段.
 
 ---
 
