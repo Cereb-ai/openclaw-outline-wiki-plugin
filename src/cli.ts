@@ -533,8 +533,37 @@ async function dispatchAttachment(
       });
     }
     const body = { name: args.name, url: args.url, documentId: args.documentId, preset };
-    const data = await outlineFetch(cfg, "attachments.createFromUrl", body);
-    const attachment = data?.data ?? null;
+    let attachment: any;
+    try {
+      const data = await outlineFetch(cfg, "attachments.createFromUrl", body);
+      attachment = data?.data ?? null;
+    } catch (err) {
+      return textResult({
+        error: `attachments.createFromUrl failed: ${(err).message}`,
+      });
+    }
+
+    // CP-2499/2505 (Fix B): outline's createFromUrl endpoint happily returns a
+    // row with `size: "0"` when the source URL is unreachable (404 / DNS fail /
+    // network error). The CLI must NOT silently report ok:true in that case —
+    // mirror src/index.ts attachmentUpload semantics so MCP and CLI stay in
+    // sync. Treat empty / "0" / 0 / missing `size` as an empty-attachment error.
+    const rawSize = attachment?.size;
+    const sizeIsEmpty =
+      rawSize === undefined ||
+      rawSize === null ||
+      rawSize === "" ||
+      rawSize === "0" ||
+      rawSize === 0;
+    if (!attachment || !attachment.id || sizeIsEmpty) {
+      return textResult({
+        error: "源 URL 不可达或抓取失败,附件为空",
+        method: "attachments.createFromUrl",
+        request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+        attachment,
+      });
+    }
+
     return textResult({
       ok: true,
       method: "attachments.createFromUrl",
