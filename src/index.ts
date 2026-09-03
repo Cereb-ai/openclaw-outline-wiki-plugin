@@ -1015,6 +1015,7 @@ async function attachmentUpload(
           "outline_attachment_upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document.",
       });
     }
+    let attachmentData: any;
     try {
       const data = await outlineFetch(cfg, "attachments.createFromUrl", {
         name: args.name,
@@ -1022,25 +1023,52 @@ async function attachmentUpload(
         documentId: args.documentId,
         preset,
       });
-      const attachment = data?.data ?? null;
-      return textResult({
-        ok: true,
-        method: "attachments.createFromUrl",
-        request: { name: args.name, url: args.url, documentId: args.documentId, preset },
-        attachment,
-        summary: attachment
-          ? {
-              id: attachment.id,
-              name: args.name,
-              url: attachment.url ?? null,
-            }
-          : null,
-      });
+      attachmentData = data?.data ?? null;
     } catch (err) {
       return textResult({
         error: `attachments.createFromUrl failed: ${errorMessage(err)}`,
       });
     }
+
+    // Outline's attachments.createFromUrl endpoint returns ok:true + a
+    // placeholder attachment record with size:"0" when the source URL is
+    // unreachable / 404s / returns an empty file — callers used to be told
+    // "upload succeeded" while the attachment is unusable in the doc.
+    // (CP-2492: confirmed against dev wiki — every external URL hits the
+    // size:"0" branch because the dev egress is sandboxed; a working URL
+    // surfaces a positive size string.)
+    // Outline's API serializes size as a string, but treat any falsy /
+    // "0" / numeric-0 / missing size as failure.
+    const rawSize = (attachmentData as any)?.size;
+    const sizeIsEmpty =
+      rawSize === undefined ||
+      rawSize === null ||
+      rawSize === "" ||
+      rawSize === "0" ||
+      rawSize === 0;
+    if (!attachmentData || !attachmentData.id || sizeIsEmpty) {
+      return textResult({
+        error: "源 URL 不可达或抓取失败,附件为空",
+        method: "attachments.createFromUrl",
+        request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+        attachment: attachmentData,
+      });
+    }
+
+    const attachment = attachmentData;
+    return textResult({
+      ok: true,
+      method: "attachments.createFromUrl",
+      request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+      attachment,
+      summary: attachment
+        ? {
+            id: attachment.id,
+            name: args.name,
+            url: attachment.url ?? null,
+          }
+        : null,
+    });
   }
 
   // Branch B: caller provides a local file path. The plugin reads the file,

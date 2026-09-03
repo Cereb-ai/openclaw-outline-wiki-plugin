@@ -119,3 +119,97 @@ describe("outline_attachment_upload path mode", () => {
     });
   });
 });
+
+describe("outline_attachment_upload url mode (CP-2492 size guard)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("size>0 → ok:true with attachment echoed", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: "attachment-real",
+          url: "/api/attachments.redirect?id=attachment-real",
+          size: "128",
+          name: "good.txt",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_attachment_upload");
+
+    const result = await tool.execute("test-call-id", {
+      name: "good.txt",
+      url: "https://example.test/good.txt",
+      documentId: "doc-id",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://outline.example.test/api/attachments.createFromUrl",
+    );
+    const details = unwrapDetails(result);
+    expect(details.ok).toBe(true);
+    expect(details.method).toBe("attachments.createFromUrl");
+    expect(details.summary).toEqual({
+      id: "attachment-real",
+      name: "good.txt",
+      url: "/api/attachments.redirect?id=attachment-real",
+    });
+    expect(details.attachment).toMatchObject({ id: "attachment-real", size: "128" });
+  });
+
+  test("size=\"0\" → error 源 URL 不可达或抓取失败,附件为空 (no ok:true)", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: "attachment-empty",
+          url: "/api/attachments.redirect?id=attachment-empty",
+          size: "0",
+          name: "bad.txt",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_attachment_upload");
+
+    const result = await tool.execute("test-call-id", {
+      name: "bad.txt",
+      url: "https://example.test/missing.txt",
+      documentId: "doc-id",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const details = unwrapDetails(result);
+    expect(details.ok).toBeUndefined();
+    expect(details.error).toBe("源 URL 不可达或抓取失败,附件为空");
+    expect(details.method).toBe("attachments.createFromUrl");
+    expect(details.attachment).toMatchObject({ id: "attachment-empty", size: "0" });
+  });
+
+  test("size missing → error 源 URL 不可达或抓取失败,附件为空 (no ok:true)", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: "attachment-nosize",
+          url: "/api/attachments.redirect?id=attachment-nosize",
+          name: "nosize.txt",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_attachment_upload");
+
+    const result = await tool.execute("test-call-id", {
+      name: "nosize.txt",
+      url: "https://example.test/nosize.txt",
+      documentId: "doc-id",
+    });
+
+    const details = unwrapDetails(result);
+    expect(details.ok).toBeUndefined();
+    expect(details.error).toBe("源 URL 不可达或抓取失败,附件为空");
+    expect(details.attachment).toMatchObject({ id: "attachment-nosize" });
+  });
+});
