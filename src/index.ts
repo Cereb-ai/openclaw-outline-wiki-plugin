@@ -100,7 +100,7 @@ export default defineToolPlugin({
       name: "outline_doc_list",
       label: "Outline List Documents",
       description:
-        "List documents in outline. Response contains metadata only — `text` (markdown body) is stripped from every document to keep toolResult payload small (CP-2379 planner-token fix: see `outline_doc_get` for the body). Optional filters: `limit` (default 25), `offset`, `collectionId` (UUID), `query` (substring match on title). Calls `documents.list`.",
+        "List documents in outline. Response contains metadata only — `text` (markdown body) is stripped from every document to keep toolResult payload small (CP-2379 planner-token fix: see `outline_doc_get` for the body). **Default excludes archived documents** — each document's `archivedAt` is preserved (null when live) so callers can inspect; pass `includeArchived: true` to surface archived docs alongside live ones. Optional filters: `limit` (default 25), `offset`, `collectionId` (UUID), `query` (substring match on title), `includeArchived` (default false). Calls `documents.list`.",
       parameters: Type.Object({
         limit: Type.Optional(
           Type.Integer({
@@ -119,6 +119,13 @@ export default defineToolPlugin({
         ),
         query: Type.Optional(
           Type.String({ description: "Substring filter on document title." }),
+        ),
+        includeArchived: Type.Optional(
+          Type.Boolean({
+            description:
+              "Include archived documents in the result. Default false — archived docs are filtered out (Outline's `documents.list` defaults to excluding archived; this is a defensive client-side filter on top). Each surviving document carries `archivedAt` (null for live docs).",
+            default: false,
+          }),
         ),
       }),
       async execute(args, cfg) {
@@ -275,7 +282,7 @@ export default defineToolPlugin({
       name: "outline_search_query",
       label: "Outline Search",
       description:
-        "Full-text search across documents (Bearer-auth works). Required: `query` (non-empty string). Optional: `limit` (default 25), `offset`, `collectionId` (UUID).",
+        "Full-text search across documents (Bearer-auth works). **Default excludes archived documents** — Outline's `documents.search` endpoint does NOT exclude archived by default, so the plugin applies a defensive `archivedAt != null` filter on top; pass `includeArchived: true` to keep archived hits. Each surviving hit's `document` carries `archivedAt` (null when live) so callers can still inspect archive state. Required: `query` (non-empty string). Optional: `limit` (default 25), `offset`, `collectionId` (UUID), `includeArchived` (default false).",
       parameters: Type.Object({
         query: Type.String({ description: "Full-text search query (required, non-empty)." }),
         limit: Type.Optional(
@@ -286,6 +293,13 @@ export default defineToolPlugin({
         ),
         collectionId: Type.Optional(
           Type.String({ description: "Restrict search to one collection UUID." }),
+        ),
+        includeArchived: Type.Optional(
+          Type.Boolean({
+            description:
+              "Include archived documents in the search hits. Default false — archived docs (archivedAt != null) are filtered out client-side. Each surviving hit's `document` carries `archivedAt` (null when live).",
+            default: false,
+          }),
         ),
       }),
       async execute(args, cfg) {
@@ -309,13 +323,20 @@ export default defineToolPlugin({
       name: "outline_collection_documents",
       label: "Outline List Collection Documents",
       description:
-        "List documents in a collection (includes the children structure). Required: `id` (collection UUID, e.g. WTO = 2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba). Optional: `limit` (default 25), `offset`.",
+        "List documents in a collection (returns the cached navigation tree: `{id, url, title, children}` per node). **Archived children are excluded by default** — the underlying endpoint returns a navigation tree where `Document.toNavigationNode` defaults to `includeArchived: false`, so the response never surfaces archived docs. `includeArchived` is accepted for API symmetry with `outline_search_query` / `outline_doc_list` but currently has no effect (endpoint capability — the response shape does not carry `archivedAt` to filter on). Required: `id` (collection UUID, e.g. WTO = 2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba). Optional: `limit` (default 25), `offset`, `includeArchived` (default false; informational, see above).",
       parameters: Type.Object({
         id: Type.String({
           description: "Collection UUID.",
         }),
         limit: Type.Optional(Type.Integer({ minimum: 1 })),
         offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        includeArchived: Type.Optional(
+          Type.Boolean({
+            description:
+              "Accepted for API symmetry with `outline_search_query` / `outline_doc_list`. Default false. Note: the underlying `collections.documents` endpoint returns a navigation tree that already excludes archived children and does not surface `archivedAt`, so this flag has no effect on the response today.",
+            default: false,
+          }),
+        ),
       }),
       async execute(args, cfg) {
         return await collectionDocuments(args, cfg as OutlineWikiConfig);
@@ -475,15 +496,38 @@ async function docList(
   const guard = requireConfig(cfg);
   if (guard) return guard;
 
+  // CP-2559: includeArchived defaults to false — Outline's `documents.list`
+  // endpoint already defaults to excluding archived docs server-side
+  // (`where.archivedAt = null`), but we re-enforce client-side as a defensive
+  // filter and so the response shape is consistent across outline versions.
+  const includeArchived = pickBoolean(args.includeArchived, false);
+
   const body: Record<string, unknown> = {
     limit: pickNumber(args.limit, 25),
     offset: pickNumber(args.offset, 0),
   };
   if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
   if (typeof args.query === "string") body.query = args.query;
+  // When the caller opts in to archived docs, ask the server for them too
+  // (otherwise the server may honor its default-exclude behavior and return
+  // an empty result even when archived matches exist).
+  if (includeArchived) {
+    body.statusFilter = ["archived", "published", "draft"];
+  }
 
   try {
     const data = await outlineFetch(cfg, "documents.list", body);
+    let trimmedDocs = Array.isArray(data?.data)
+      ? data.data.map(trimDocBody)
+      : [];
+    // CP-2559: defensive client-side archive filter — drop any doc whose
+    // archivedAt is set unless the caller opted in via includeArchived=true.
+    if (!includeArchived) {
+      trimmedDocs = trimmedDocs.filter(
+        (d: Record<string, unknown> | null) =>
+          d == null || d.archivedAt == null,
+      );
+    }
     return textResult({
       ok: true,
       method: "documents.list",
@@ -493,10 +537,9 @@ async function docList(
       // complete body in `text`, which is overkill for a list view (use
       // `outline_doc_get` to fetch a body). Metadata fields kept match the
       // navigation set the agent needs to follow up with `outline_doc_get`
-      // / `outline_doc_move` / `outline_doc_update`.
-      documents: Array.isArray(data?.data)
-        ? data.data.map(trimDocBody)
-        : [],
+      // / `outline_doc_move` / `outline_doc_update`. CP-2559 also passes
+      // through `archivedAt` so callers can see archive state (null for live).
+      documents: trimmedDocs,
       pagination: data?.pagination ?? null,
     });
   } catch (err) {
@@ -940,15 +983,45 @@ async function searchQuery(
       error: "outline_search_query requires a non-empty `query` (string) argument.",
     });
   }
+  // CP-2559: includeArchived defaults to false — Outline's `documents.search`
+  // does NOT exclude archived docs by default (unlike `documents.list`), so
+  // we must filter client-side. Pass includeArchived=true to keep archived
+  // hits in the result.
+  const includeArchived = pickBoolean(args.includeArchived, false);
+
   const body: Record<string, unknown> = {
     query: args.query,
     limit: pickNumber(args.limit, 25),
     offset: pickNumber(args.offset, 0),
   };
   if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+  // When the caller opts in, ask the server for archived hits too via the
+  // statusFilter shorthand so the server doesn't drop them at the query
+  // level. (Outline's `documents.search` honors `statusFilter` in addition
+  // to the modern `filters` DSL.)
+  if (includeArchived) {
+    body.statusFilter = ["archived", "published", "draft"];
+  }
 
   try {
     const data = await outlineFetch(cfg, "documents.search", body);
+    let hits = Array.isArray(data?.data)
+      ? data.data.map(trimSearchHit)
+      : [];
+    // CP-2559: defensive client-side archive filter — drop any hit whose
+    // inner document has archivedAt set unless the caller opted in. The
+    // server-side `documents.search` defaults to including archived hits,
+    // so without this filter the planner sees archived docs mixed into the
+    // search results (which is the bug that motivated this ticket).
+    if (!includeArchived) {
+      hits = hits.filter((h: Record<string, unknown> | null) => {
+        const d = h?.document as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        return d == null || d.archivedAt == null;
+      });
+    }
     return textResult({
       ok: true,
       method: "documents.search",
@@ -960,10 +1033,9 @@ async function searchQuery(
       // We keep `ranking` + `context` (already a snippet, sibling of
       // `document`) + the inner-document navigation set (same set as
       // `outline_doc_list`: id / title / url / urlId / collectionId /
-      // updatedAt). Callers that need the body must call `outline_doc_get`.
-      documents: Array.isArray(data?.data)
-        ? data.data.map(trimSearchHit)
-        : [],
+      // updatedAt / archivedAt). Callers that need the body must call
+      // `outline_doc_get`.
+      documents: hits,
       pagination: data?.pagination ?? null,
     });
   } catch (err) {
@@ -1236,6 +1308,15 @@ async function collectionDocuments(
     });
   }
 
+  // CP-2559: includeArchived defaults to false. The endpoint returns a
+  // NavigationNode tree (server-side `Document.toNavigationNode` defaults
+  // to `includeArchived: false`), and the response shape does NOT carry
+  // `archivedAt` for us to filter on — so the server-side default already
+  // handles exclusion. We accept the flag for API symmetry with
+  // `outline_search_query` / `outline_doc_list`, but it currently has no
+  // effect (documented in the tool description).
+  const includeArchived = pickBoolean(args.includeArchived, false);
+
   const body: Record<string, unknown> = {
     id: args.id,
     limit: pickNumber(args.limit, 25),
@@ -1247,7 +1328,7 @@ async function collectionDocuments(
     return textResult({
       ok: true,
       method: "collections.documents",
-      request: body,
+      request: { ...body, includeArchived },
       documents: data?.data ?? [],
       pagination: data?.pagination ?? null,
     });
@@ -1532,6 +1613,10 @@ function pickNumber(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
+function pickBoolean(v: unknown, fallback: boolean): boolean {
+  return typeof v === "boolean" ? v : fallback;
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -1563,10 +1648,13 @@ function textResult(data: unknown): {
 // Both helpers are pure / side-effect-free; tests can call them directly.
 
 // Navigation metadata kept on a trimmed document. Conservative: id +
-// title + url + urlId + collectionId + updatedAt cover every follow-up
-// call the agent would want to make (`outline_doc_get {id}`,
-// `outline_doc_update {id, ...}`, `outline_doc_move {id, ...}`, plus
-// opening the wiki URL). `text` is the only thing stripped.
+// title + url + urlId + collectionId + updatedAt + archivedAt cover
+// every follow-up call the agent would want to make (`outline_doc_get
+// {id}`, `outline_doc_update {id, ...}`, `outline_doc_move {id, ...}`,
+// plus opening the wiki URL). `text` is the only thing stripped.
+// `archivedAt` is included so callers can see archive state (null when
+// live) — CP-2559 added this so `outline_doc_list` / `outline_search_query`
+// responses surface the same archive signal the server holds.
 const TRIMMED_DOC_FIELDS = [
   "id",
   "title",
@@ -1574,6 +1662,7 @@ const TRIMMED_DOC_FIELDS = [
   "urlId",
   "collectionId",
   "updatedAt",
+  "archivedAt",
 ] as const;
 
 function trimDocBody(doc: unknown): Record<string, unknown> | null {
