@@ -196,12 +196,21 @@ async function dispatchDoc(
   switch (method) {
     case "list": {
       // Mirror index.ts docList: pickNumber → finite-number or 25 default.
+      // CP-2559: includeArchived defaults to false — Outline's
+      // `documents.list` already defaults to excluding archived docs
+      // server-side, but we re-enforce client-side for parity with the
+      // MCP tool + consistency across outline versions.
+      const includeArchived =
+        typeof args.includeArchived === "boolean" ? args.includeArchived : false;
       const body: Record<string, unknown> = {
         limit: pickNumber(args.limit, 25),
         offset: pickNumber(args.offset, 0),
       };
       if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
       if (typeof args.query === "string") body.query = args.query;
+      if (includeArchived) {
+        body.statusFilter = ["archived", "published", "draft"];
+      }
       let data;
       try {
         data = await outlineFetch(cfg, "documents.list", body);
@@ -210,11 +219,20 @@ async function dispatchDoc(
       }
       // CP-2379: strip `text` (full markdown body) from every doc — see
       // trimDocBody in src/index.ts. CLI parity with the MCP tool.
+      // CP-2559: defensive client-side archive filter + archivedAt metadata.
+      let trimmedDocs = Array.isArray(data?.data)
+        ? data.data.map(trimDocBody)
+        : [];
+      if (!includeArchived) {
+        trimmedDocs = trimmedDocs.filter(
+          (d) => d == null || d.archivedAt == null,
+        );
+      }
       return textResult({
         ok: true,
         method: "documents.list",
         request: body,
-        documents: Array.isArray(data?.data) ? data.data.map(trimDocBody) : [],
+        documents: trimmedDocs,
         pagination: data?.pagination ?? null,
       });
     }
@@ -416,9 +434,24 @@ async function dispatchCollection(
     return textResult({ ok: true, method: "collections.list", collections: data?.data ?? [], pagination: data?.pagination ?? null });
   }
   if (method === "documents") {
+    // CP-2559: includeArchived defaults to false. The endpoint returns a
+    // NavigationNode tree (server-side `Document.toNavigationNode` defaults
+    // to `includeArchived: false`), and the response shape does NOT carry
+    // `archivedAt` for us to filter on — so the server-side default already
+    // handles exclusion. We accept the flag for API symmetry with
+    // `outline_search_query` / `outline_doc_list`, but it currently has no
+    // effect (documented in the MCP tool description).
+    const includeArchived =
+      typeof args.includeArchived === "boolean" ? args.includeArchived : false;
     const body = { id: args.id, limit: args.limit ?? 25, offset: args.offset ?? 0 };
     const data = await outlineFetch(cfg, "collections.documents", body);
-    return textResult({ ok: true, method: "collections.documents", documents: data?.data ?? [], pagination: data?.pagination ?? null });
+    return textResult({
+      ok: true,
+      method: "collections.documents",
+      request: { ...body, includeArchived },
+      documents: data?.data ?? [],
+      pagination: data?.pagination ?? null,
+    });
   }
   if (method === "create") {
     if (typeof args.name !== "string" || args.name.length === 0) {
@@ -471,6 +504,10 @@ async function dispatchSearch(
   if (typeof args.query !== "string" || args.query.trim().length === 0) {
     return textResult({ error: "search.query requires a non-empty `query` (string)" });
   }
+  // CP-2559: includeArchived defaults to false — Outline's `documents.search`
+  // does NOT exclude archived docs by default, so we must filter client-side.
+  const includeArchived =
+    typeof args.includeArchived === "boolean" ? args.includeArchived : false;
   // Mirror index.ts searchQuery: limit default = 25 (not 10), via pickNumber helper.
   const body: Record<string, unknown> = {
     query: args.query,
@@ -478,6 +515,9 @@ async function dispatchSearch(
     offset: pickNumber(args.offset, 0),
   };
   if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+  if (includeArchived) {
+    body.statusFilter = ["archived", "published", "draft"];
+  }
   let data;
   try {
     data = await outlineFetch(cfg, "documents.search", body);
@@ -486,11 +526,22 @@ async function dispatchSearch(
   }
   // CP-2379: strip `document.text` from each hit — see trimSearchHit in
   // src/index.ts. CLI parity with the MCP tool.
+  // CP-2559: defensive client-side archive filter + archivedAt metadata
+  // (trimSearchHit / trimDocBody pass through `archivedAt`).
+  let hits = Array.isArray(data?.data)
+    ? data.data.map(trimSearchHit)
+    : [];
+  if (!includeArchived) {
+    hits = hits.filter((h) => {
+      const d = h?.document;
+      return d == null || d.archivedAt == null;
+    });
+  }
   return textResult({
     ok: true,
     method: "documents.search",
     request: body,
-    documents: Array.isArray(data?.data) ? data.data.map(trimSearchHit) : [],
+    documents: hits,
     pagination: data?.pagination ?? null,
   });
 }
@@ -706,9 +757,10 @@ function pickNumber(v: unknown, fallback: number): number {
 
 // CP-2379 trim helpers — mirror src/index.ts `trimDocBody` / `trimSearchHit`
 // so the CLI and MCP tool produce byte-for-byte identical response shapes.
-// Navigation metadata kept: id, title, url, urlId, collectionId, updatedAt.
+// Navigation metadata kept: id, title, url, urlId, collectionId, updatedAt,
+// archivedAt (CP-2559 — null for live docs, ISO timestamp for archived).
 // `text` (full markdown body) is the only field stripped.
-const TRIMMED_DOC_FIELDS = ["id", "title", "url", "urlId", "collectionId", "updatedAt"];
+const TRIMMED_DOC_FIELDS = ["id", "title", "url", "urlId", "collectionId", "updatedAt", "archivedAt"];
 
 function trimDocBody(doc) {
   if (!doc || typeof doc !== "object") return null;
