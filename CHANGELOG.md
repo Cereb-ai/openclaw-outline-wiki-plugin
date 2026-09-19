@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-19
+
+### Added
+- `outline_doc_update` now supports `editMode=patch` and passes `findText` through to `documents.update` as the anchor text. When `findText` is supplied, the plugin no longer appends it to `text` and returns the matched occurrences in the response, so callers can scope in-place edits without re-sending the whole document body.
+
+### Changed
+- Tool description, `skills/outline-wiki/SKILL.md`, and `README.md` now document all four `editMode` values (`replace` / `append` / `prepend` / `patch`) including when to use `findText` as the patch anchor.
+
 ## [0.5.1] - 2026-07-18
 
 ### Fixed
@@ -55,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial implementation: read-only methods (`documents.list`, `documents.info`, `collections.list`) over the legacy single-dispatcher shape.
 
-[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Cereb-ai/openclaw-outline-wiki-plugin/releases/tag/v0.4.0
