@@ -22,7 +22,7 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 | `outline_doc_list` | list documents (metadata only — `text` stripped, see Response-trim contract below) | — |
 | `outline_doc_get` | single document + full markdown body | `id` |
 | `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`); `collectionId` falls back to `defaultCollectionId` config; verifies result via `documents.info`; **response trims `document.text`** (CP-2379 — round-trip trim) | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
-| `outline_doc_update` | update text / title (`editMode="replace"` default); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent); **response trims `document.text`** (CP-2379 — round-trip trim) | `id` + (`text` or `title`) |
+| `outline_doc_update` | update text / title. `editMode` picks how `text` is applied — `replace` (default, full overwrite) / `append` / `prepend` / `patch` (`patch` requires `findText`; server returns 400 if missing or 404 if not matched — never silently replaces the whole document); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent); **response trims `document.text`** (CP-2379 — round-trip trim) | `id` + (`text` or `title`) |
 | `outline_doc_delete` | trash (default) or hard-delete (`permanent: true`, requires already-trashed) | `id` |
 | `outline_doc_archive` | move to archive (admin-readable, recoverable) | `id` |
 | `outline_doc_restore` | restore from archive | `id` |
@@ -119,6 +119,10 @@ outline_search_query { query: "redis sentinel", limit: 10 }
 outline_doc_get { id: "<doc-uuid>" }
 outline_doc_create { title: "...", text: "...", collectionId: "<uuid>", publish: true }
 outline_doc_update { id: "<doc-uuid>", text: "...", editMode: "replace" }
+# In-place edit (cheapest — caller sends only the delta; requires `findText`):
+outline_doc_update { id: "<doc-uuid>", text: "new wording", editMode: "patch", findText: "old wording" }
+# Append a section:
+outline_doc_update { id: "<doc-uuid>", text: "\n## New section\n...", editMode: "append" }
 outline_doc_move { id: "<doc-uuid>", collectionId: "<target-uuid>", parentDocumentId: "<parent-uuid>" }
 outline_attachment_upload { name: "x.png", url: "<public-url>", documentId: "<doc-uuid>", preset: "documentAttachment" }
 ```
@@ -134,6 +138,8 @@ outline-tool outline_doc_get '{"id":"..."}'
 outline-tool outline_search_query '{"query":"redis sentinel"}'
 outline-tool outline_doc_create '{"title":"...","text":"...","collectionId":"..."}'
 outline-tool outline_doc_update '{"id":"...","text":"...","editMode":"replace","changelog":"..."}'
+# In-place edit (cheapest; requires findText):
+outline-tool outline_doc_update '{"id":"...","text":"new","editMode":"patch","findText":"old"}'
 outline-tool outline_collection_create '{"name":"..."}'
 outline-tool outline_collection_update '{"id":"...","permission":"read_write"}'
 outline-tool outline_rev_log '{"documentId":"...","limit":5}'
@@ -154,7 +160,7 @@ For your awareness as a caller: the OpenClaw named tool and the `outline-tool` C
 
 - `outline_doc_create.collectionId` resolves as `args.collectionId > cfg.defaultCollectionId`; both missing → explicit error (no silent drop).
 - `outline_doc_create` verifies the result via `documents.info` (`data.id` non-empty); verify failure → error.
-- `outline_doc_update` accepts `editMode` (default `"replace"`), `publish`, `changelog` (best-effort revision-name write), `strictChangelog` (when `true`, changelog write failure hard-fails the response).
+- `outline_doc_update` accepts `editMode` (one of `replace` (default) / `append` / `prepend` / `patch`), `findText` (required when `editMode=patch` — server returns 400 if missing or 404 if not matched; never a silent full-document replace), `publish`, `changelog` (best-effort revision-name write), `strictChangelog` (when `true`, changelog write failure hard-fails the response).
 - `outline_search_query.limit` defaults to **25** (not 10) via `pickNumber(args.limit, 25)`.
 
 If you notice drift between the two paths in practice, please file an issue — the development side will harden `tests/cli-vs-mcp-parity.test.ts` and fix the drift. See `skills/outline-wiki/SKILL.md` for the full behavior table.

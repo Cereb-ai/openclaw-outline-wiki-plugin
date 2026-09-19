@@ -336,6 +336,15 @@ async function dispatchDoc(
       }
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.publish === "boolean") body.publish = args.publish;
+      // findText passthrough — mirrors src/index.ts docUpdate. Meaningful only
+      // when editMode=patch; the server returns 400 (missing) / 404 (no
+      // match) — never a silent full-doc replace. We forward it whenever the
+      // caller supplied a non-empty string so the wire body matches what the
+      // caller asked for; the server-side schema check decides whether to
+      // apply it.
+      if (typeof args.findText === "string") {
+        body.findText = args.findText;
+      }
 
       const warnings = [];
       let data;

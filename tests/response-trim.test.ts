@@ -503,6 +503,24 @@ describe("CP-2395 request-echo trim helpers (AC1/AC2 — text MUST NOT round-tri
     expect(titleOnly).not.toHaveProperty("editMode");
   });
 
+  test("CP-3322: trimUpdateRequest also drops findText (no anchor leak in response)", () => {
+    // findText is patch-only and may be a long, document-specific substring.
+    // Round-tripping it in `request` would echo the agent's anchor back at
+    // it — same planner-token burn as text round-tripping. Strip it.
+    const trimmed = trimUpdateRequest({
+      id: "doc-id",
+      text: "replacement",
+      editMode: "patch",
+      findText: "anchor — sensitive substring that MUST NOT round-trip",
+    }) as Record<string, unknown>;
+
+    expect(trimmed).toEqual({ id: "doc-id" });
+    expect(trimmed).not.toHaveProperty("text");
+    expect(trimmed).not.toHaveProperty("editMode");
+    expect(trimmed).not.toHaveProperty("findText");
+    expect(JSON.stringify(trimmed)).not.toContain("sensitive substring that MUST NOT round-trip");
+  });
+
   test("trimCreateRequest / trimUpdateRequest are defensive on nullish input", () => {
     expect(trimCreateRequest(null)).toEqual({});
     expect(trimCreateRequest(undefined)).toEqual({});

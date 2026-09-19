@@ -394,6 +394,88 @@ describe("CLI ↔ MCP parity: request body construction", () => {
       expect(mcp).toHaveLength(1);
       expect(cli[0]).toEqual(mcp[0]);
     });
+
+    // ===== CP-3322: editMode=patch + findText parity =====
+    //
+    // Both MCP and CLI must forward findText to the wire body when the
+    // caller supplies it — pre-CP-3322 the CLI dropped it on the floor and
+    // the server always returned 400 regardless of what the caller passed.
+
+    test("CP-3322: editMode=patch + findText passes through in both paths", async () => {
+      const updated = { id: "doc-id", title: "T" };
+      const args = {
+        id: "doc-id",
+        text: "new wording",
+        editMode: "patch",
+        findText: "old wording",
+      };
+      const mcp = await captureMcpBodies("outline_doc_update", args, [
+        jsonResponse({ data: updated }),
+      ]);
+      const cli = await captureCliBodies(
+        () => dispatchDoc("update", args, cfg) as Promise<unknown>,
+        [jsonResponse({ data: updated })],
+      );
+      // Wire body MUST be identical between MCP and CLI — the whole point
+      // of the parity suite.
+      expect(cli[0]).toEqual(mcp[0]);
+      expect(cli[0]).toEqual({
+        id: "doc-id",
+        text: "new wording",
+        editMode: "patch",
+        findText: "old wording",
+      });
+    });
+
+    test("CP-3322: editMode=patch without findText surfaces 400 in both paths", async () => {
+      const args = {
+        id: "doc-id",
+        text: "replacement",
+        editMode: "patch",
+      };
+      // Server error body. Use a factory so MCP and CLI each get a fresh
+      // Response — Node Response bodies are single-use, and the MCP path's
+      // outlineFetch consumes it before the CLI path runs.
+      const verboseServerMsg =
+        "findText is required when using patch editMode — please supply the markdown substring you want to replace (anchor must be unique in the current document; use outline_doc_get first to inspect the body)";
+      const makeErrResp = () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error: "validation_error",
+            status: 400,
+            message: verboseServerMsg,
+          }),
+          {
+            status: 400,
+            statusText: "Bad Request",
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      const mcpFetch = vi.fn().mockResolvedValue(makeErrResp());
+      vi.stubGlobal("fetch", mcpFetch);
+      const mcpResult = await getMcpTool("outline_doc_update").execute(
+        "test-call-id",
+        args,
+      );
+      const mcpDetails = JSON.parse((mcpResult as any).content[0].text).details;
+
+      const cliFetch = vi.fn().mockResolvedValue(makeErrResp());
+      vi.stubGlobal("fetch", cliFetch);
+      const cliResult: any = await dispatchDoc("update", args, cfg);
+      const cliDetails = JSON.parse(cliResult.content[0].text);
+
+      // Both surfaces MUST propagate the server's 400 so the agent sees the
+      // same actionable error on both paths. The MCP path uses
+      // `errorMessage(err)` (which strips the status line) and the CLI path
+      // uses raw `(err).message`; both must surface the validation message.
+      expect(mcpDetails.error).toContain("findText is required when using patch editMode");
+      expect(mcpDetails.error).toContain("400");
+      expect(cliDetails.error).toContain("findText is required when using patch editMode");
+      expect(cliDetails.error).toContain("400");
+      expect(mcpDetails).not.toHaveProperty("ok", true);
+      expect(cliDetails).not.toHaveProperty("ok", true);
+    });
   });
 
   describe("outline_search_query", () => {

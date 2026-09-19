@@ -34,6 +34,10 @@ outline_search_query { query: "redis sentinel", limit: 10 }
 outline_doc_get { id: "<doc-uuid>" }
 outline_doc_create { title: "...", text: "...", collectionId: "<uuid>", publish: true }
 outline_doc_update { id: "<doc-uuid>", text: "...", editMode: "replace" }
+# 定点编辑 (最省 token — 调用方只发要改的那段; 必须带 findText):
+outline_doc_update { id: "<doc-uuid>", text: "新内容", editMode: "patch", findText: "旧内容" }
+# 追加章节:
+outline_doc_update { id: "<doc-uuid>", text: "\n## 新章节\n...", editMode: "append" }
 outline_doc_move { id: "<doc-uuid>", collectionId: "<target-uuid>", parentDocumentId: "<parent-uuid>" }
 outline_attachment_upload { name: "x.png", url: "<public-url>", documentId: "<doc-uuid>", preset: "documentAttachment" }
 outline_rev_log { documentId: "<doc-uuid>", limit: 5 }
@@ -70,7 +74,7 @@ outline-tool --help
 | `outline_doc_list` | `documents.list` | 列文档 (返回**裁剪版**, 仅 metadata, 不含 markdown 正文 — 见下文「返回格式裁剪」) | — | `limit`, `offset`, `collectionId`, `query` |
 | `outline_doc_get` | `documents.info` | 单文档 + metadata + markdown 正文 (单调用) | `id` | — |
 | `outline_doc_create` | `documents.create` | 创建文档 (publish=true 默认). **返回裁剪** (CP-2379 + CP-2395): 不回 `document.text` 全文, 只回 nav metadata + summary; `request` 字段也裁剪为 `{title}` (不回 input body 全文) | `title`, `text`, `collectionId` (可走 cfg `defaultCollectionId`) | `publish`, `parentDocumentId` (挂到父文档下) |
-| `outline_doc_update` | `documents.update` | 更新 text / title (`editMode=replace` 默认). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent). **返回裁剪** (CP-2379 + CP-2395): 不回 `document.text` 全文, 只回 nav metadata + summary; `request` 字段也裁剪为 `{id[, title]}` (不回 input body 全文, 含严格错误路径) | `id` + (`text` / `title` 之一) | `editMode`, `publish`, `changelog` |
+| `outline_doc_update` | `documents.update` | 更新 text / title. `editMode` 控制 `text` 怎么落地 — `replace` (默认, 整篇覆盖) / `append` (末尾追加) / `prepend` (开头追加) / `patch` (定点替换, 必须带 `findText`). **拒绝** `parentDocumentId` 入参 (server silent drop, use `outline_doc_move` to reparent). **返回裁剪** (CP-2379 + CP-2395): 不回 `document.text` 全文, 只回 nav metadata + summary; `request` 字段也裁剪为 `{id[, title]}` (不回 input body 全文, 含严格错误路径) | `id` + (`text` / `title` 之一) | `editMode`, `findText` (patch 必填), `publish`, `changelog` |
 | `outline_doc_delete` | `documents.delete` | trash (default) / 硬删 (`permanent: true`) | `id` | `permanent` |
 | `outline_doc_archive` | `documents.archive` | 归档 (admin 可读, 可 restore) | `id` | — |
 | `outline_doc_restore` | `documents.restore` | 从 archive 恢复 | `id` | — |
@@ -146,15 +150,30 @@ outline-tool --help
 
 ### 场景 3: 修改已有文档
 
+**4 种 editMode** (Outline 共享 `TextEditMode`, 服务端原生 4 值; plugin 完全透传):
+
+| editMode | 语义 | 必填参数 | token 开销 | 何时用 |
+|---|---|---|---|---|
+| `replace` (默认) | 整篇覆盖为 `text` | `text` | 最大 — 调用方需发整篇正文, 服务端回声再裁剪 (CP-2379) | 整篇重写 / 首次创建后微调 |
+| `append` | `text` 追加到正文末尾 | `text` | 小 — 只发增量 | 在文档末尾加新章节 / 列表 |
+| `prepend` | `text` 插入到正文开头 | `text` | 小 — 只发增量 | 在文档顶部加 banner / 元信息 |
+| `patch` | 在正文中找到 `findText` 一次性替换为 `text` | `text` + **`findText`** | 最小 — 只发改动的子串 + 锚点 | 大文档里改一行 / 修一处 typo / 改一段描述 |
+
+**patch 必填 + 服务端 fail-loud (绝不静默整篇 replace)**:
+- 缺 `findText` → 服务端返 `400 validation_error: findText is required when using patch editMode`
+- `findText` 未命中 → 服务端返 `404 not_found` (实测 dev wiki, 2026-09-19)
+- **绝不会**退化成整篇 replace — plugin 也只是透传, 不做 fallback
+
+**调用模式推荐**:
 ```
-1. outline_doc_get {id: "..."}                      # 拿当前内容
+1. outline_doc_get {id: "..."}                      # 拿当前内容, 选好锚点子串
 2. (基于 text 改, ⚠️ 去掉首行 # 标题 - 见避坑 1)
-3. outline_doc_update {
-     id: "...",
-     text: "...",
-     editMode: "replace"                            # 默认值, 可省略
-   }
+3a. 改全文: outline_doc_update {id, text, editMode: "replace"}
+3b. 加章节: outline_doc_update {id, text: "\n## 新章节...", editMode: "append"}
+3c. 改一处: outline_doc_update {id, text: "new", editMode: "patch", findText: "old"}
 ```
+
+**已废弃**: 旧版的 boolean `append: true` flag 不再接受 — 改用 `editMode: "append"` (Outline shared type 早就不带这个 flag, 老 flag 自动转 `editMode=append` 的兼容层已移除).
 
 ### 场景 4: 批量浏览一个 collection 的文档树
 
@@ -229,6 +248,10 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 
 4. **publish 默认 true**: 创建/更新文档**立即可见**, 不需要二次 publish 操作.
 
+5. **`editMode=patch` 必须带 `findText`**: 服务端先校验 findText 存在, 再校验匹配. 缺 findText → `400 validation_error: findText is required when using patch editMode`; findText 未命中 → `404 not_found` (实测 dev wiki, 2026-09-19). **绝不静默整篇 replace** — 老 plugin (v0.5.1) 不透传 findText, 调用方即使带也丢, 服务端永远 400. v0.5.2+ 已透传. 调用前先用 `outline_doc_get` 选一个唯一性足够的子串 (含前后若干上下文) 做锚点.
+
+6. **避免整篇 replace (省 token)**: 修改大文档时优先用 `patch` (定点替换) 或 `append`/`prepend` (增量追加), 而不是 `replace` (整篇覆盖). 实测一篇 ~10k 字符的长文档做一行 typo 修正: `replace` 调用方要发整篇 + 服务端会原样 echo (`document.text` 已 CP-2379 裁掉, 但调用方 wire 流量 = 全文); `patch` 只发要改的子串 + 锚点, 通常 < 200 字符. 比例 ~50:1.
+
 ---
 
 ## 配置检查 (没配好时返的友好错误)
@@ -273,7 +296,8 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 |---|---|---|
 | `outline_doc_create.collectionId` 解析 | `args.collectionId` > `cfg.defaultCollectionId`; 两者皆缺 → 返回明确错误 (无静默丢弃) | 同左 |
 | `outline_doc_create` 成功后 verify | 调 `documents.info` 确认 `data.id` 非空; 失败 → 返回 error | 同左 |
-| `outline_doc_update.editMode` | 接受 `editMode`, 默认 `"replace"` | 同左 |
+| `outline_doc_update.editMode` | 接受 `editMode` ∈ {`replace`(默认) / `append` / `prepend` / `patch`}; plugin 完全透传, 不做白名单 (上游 Outline 才是 source of truth). patch 模式下必须带 `findText` | 同左 |
+| `outline_doc_update.findText` | 接受 `findText` (可选 string); 仅在 `editMode=patch` 下有意义 — 服务端 400 (缺) / 404 (未命中), 不会静默整篇 replace | 同左 |
 | `outline_doc_update.publish` | 接受 `publish` (boolean, 可选) | 同左 |
 | `outline_doc_update.changelog` | 接受 `changelog` (可选 string), best-effort 写入最新 revision `name` | 同左 |
 | `outline_doc_update.strictChangelog` | 接受 `strictChangelog` (bool, 默认 false); `true` 时 changelog 写失败 → 返回硬失败 | 同左 |

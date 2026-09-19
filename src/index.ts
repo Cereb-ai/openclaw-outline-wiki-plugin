@@ -178,20 +178,32 @@ export default defineToolPlugin({
       name: "outline_doc_update",
       label: "Outline Update Document",
       description:
-        "Update an existing document's `text` and/or `title` (`editMode=replace` default). Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — use `outline_doc_move` for reparent. Optional: `publish` (bool), `changelog` (string — after a successful update the plugin best-effort writes this string into the latest revision's `name` field via `revisions.update`; failures are logged in the response `warnings` array but do not fail the main update), `strictChangelog` (bool, default false — when true, changelog write failure hard-fails the update response).",
+        "Update an existing document's `text` and/or `title`. `editMode` (default `replace`) selects how `text` is applied — see below. Required: `id` (UUID) + at least one of `text` or `title`. **Does NOT accept `parentDocumentId`** — use `outline_doc_move` for reparent. Optional: `editMode` (one of `replace`|`append`|`prepend`|`patch`, default `replace`), `findText` (required when `editMode=patch` — the markdown substring to locate and replace; server returns 400 if missing or 404 if not found, **never** silently falls back to replace), `publish` (bool), `changelog` (string — after a successful update the plugin best-effort writes this string into the latest revision's `name` field via `revisions.update`; failures are logged in the response `warnings` array but do not fail the main update), `strictChangelog` (bool, default false — when true, changelog write failure hard-fails the update response).\n\n" +
+        "**editMode semantics** (mirrors Outline shared `TextEditMode`):\n" +
+        "- `replace` (default) — overwrite the entire document body with `text`. Most expensive in tokens (caller sends full body, server echoes it back); preferred only when rewriting the whole doc.\n" +
+        "- `append` — append `text` to the end of the document. Cheap (caller sends only the delta); preferred for adding new sections.\n" +
+        "- `prepend` — prepend `text` to the start of the document. Cheap; preferred for adding a header block above existing content.\n" +
+        "- `patch` — find `findText` in the existing document and replace it with `text`. Cheapest for in-place edits (caller sends only the changed region). **Requires `findText`**; server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when `findText` does not match — never silently replaces the whole document. Use `outline_doc_get` first to read the current body and pick an exact, unique substring.",
       parameters: Type.Object({
         id: Type.String({ description: "Outline document UUID." }),
         title: Type.Optional(Type.String({ description: "New title." })),
         text: Type.Optional(
           Type.String({
             description:
-              "New markdown body. Strip the leading `# <title>` line if you copied from a `documents.export` round-trip to avoid title duplication.",
+              "New markdown body. Strip the leading `# <title>` line if you copied from a `documents.export` round-trip to avoid title duplication. Required for `editMode` values `append` / `prepend` / `patch`; for `patch` it is the replacement text (must be inline-compatible with the surrounding block — multi-block replacements are rejected server-side).",
           }),
         ),
         editMode: Type.Optional(
           Type.String({
-            description: "Edit mode (default `replace`).",
+            description:
+              "How to apply `text`. One of `replace` (default — overwrite whole body), `append` (add to end), `prepend` (add to start), `patch` (replace `findText` substring in place). Deprecated: the legacy boolean `append` flag is no longer accepted here; pass `editMode: \"append\"` instead.",
             default: "replace",
+          }),
+        ),
+        findText: Type.Optional(
+          Type.String({
+            description:
+              "Required when `editMode=patch`. The exact markdown substring to locate and replace in the current document body. Server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when not matched — it NEVER silently falls back to a full-document replace. Read the body via `outline_doc_get` first to pick a substring that is unique enough to be a safe anchor.",
           }),
         ),
         publish: Type.Optional(Type.Boolean({ description: "Publish on update." })),
@@ -737,9 +749,11 @@ async function docUpdate(
     });
   }
 
-  // MVP wires text/title + editMode (default "replace") + publish.
-  // Other fields (append, icon, color, templateId) intentionally left out
-  // per YAGNI; they can be added in a follow-up.
+  // MVP wires text/title + editMode (default "replace") + publish + findText
+  // (the last is required for `editMode=patch`; the server returns a 400 if
+  // it is missing, or a 404 if it does not match — never a silent full-doc
+  // replace). Other fields (append, icon, color, templateId) intentionally
+  // left out per YAGNI; they can be added in a follow-up.
   //
   // Quickref gotcha: `documents.export` returns markdown whose first line is
   // `# <title>`. If the caller passes that export as `text` into outline_doc_update,
@@ -755,6 +769,13 @@ async function docUpdate(
     body.title = args.title;
   }
   if (typeof args.publish === "boolean") body.publish = args.publish;
+  // findText passthrough — only meaningful when editMode=patch (the server
+  // ignores it for the other three modes). We forward it whenever the caller
+  // supplied a non-empty string so the wire body matches what the caller
+  // asked for; the server-side schema check decides whether to apply it.
+  if (typeof args.findText === "string") {
+    body.findText = args.findText;
+  }
 
   // Track warnings for best-effort post-update side-effects (e.g. changelog
   // writing via revisions.update). Non-fatal — main update succeeds even if
@@ -1684,8 +1705,10 @@ function trimDocBody(doc: unknown): Record<string, unknown> | null {
 // burn from toolResult echoing the agent's own input back at it).
 //
 // These helpers strip `text` (and the rest of the heavy fields —
-// `collectionId`, `parentDocumentId`, `publish`, `editMode`) so the
-// response only carries the nav-level fields. Kept deliberately tiny:
+// `collectionId`, `parentDocumentId`, `publish`, `editMode`, `findText`,
+// `lastRevision`, `done`, `editorVersion`, `templateId`, `fullWidth`,
+// `preferences`, `insightsEnabled`, `deprecatedReason`, `append` legacy
+// flag) so the response only carries the nav-level fields. Kept deliberately tiny:
 // {title} for create (the agent already knows the title it sent), and
 // {id, title} for update (id is required to address the doc, title only
 // when the caller actually changed it). `summary` below already exposes

@@ -191,4 +191,173 @@ describe("outline_doc_update", () => {
     expect(details.request).not.toHaveProperty("changelog");
     expect(details.request).not.toHaveProperty("strictChangelog");
   });
+
+  // ===== CP-3322: editMode=patch + findText passthrough =====
+  //
+  // Outline shared TextEditMode supports 4 values: replace | append | prepend | patch.
+  // patch requires findText — server returns 400 when missing, or 404 when
+  // findText does not match; NEVER silently falls back to a full-document
+  // replace. Pre-CP-3322 the plugin dropped findText on the floor (cli.ts /
+  // index.ts only forwarded `editMode`), so any patch call failed with 400
+  // regardless of what the caller passed. CP-3322 adds findText to the
+  // TypeBox schema + wires it through to the wire body when present, so
+  // patch becomes usable end-to-end.
+
+  function errorJsonResponse(body: unknown, status: number, statusText: string): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      statusText,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  test("CP-3322: editMode=patch + findText passes through to documents.update", async () => {
+    const updated = {
+      id: "doc-id",
+      title: "T",
+      url: "https://outline.example.test/doc/doc-id",
+      urlId: "doc-id",
+      revision: 5,
+      updatedAt: "2026-09-19T05:00:00.000Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_doc_update");
+
+    const result = await tool.execute("test-call-id", {
+      id: "doc-id",
+      text: "new wording",
+      editMode: "patch",
+      findText: "old wording",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://outline.example.test/api/documents.update",
+    );
+    // The wire body MUST carry findText — pre-CP-3322 this would silently
+    // drop it and the server would 400 with "findText is required".
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      id: "doc-id",
+      text: "new wording",
+      editMode: "patch",
+      findText: "old wording",
+    });
+    const details = unwrapDetails(result);
+    expect(details).toMatchObject({ ok: true, method: "documents.update" });
+    // CP-2379 + CP-2395: response body must NOT echo findText or the new text.
+    expect(details.request).toEqual({ id: "doc-id" });
+    expect(details.request).not.toHaveProperty("findText");
+    expect(details.request).not.toHaveProperty("text");
+    expect(details.request).not.toHaveProperty("editMode");
+    expect(JSON.stringify(details)).not.toContain("old wording");
+    expect(JSON.stringify(details)).not.toContain("new wording");
+  });
+
+  test("CP-3322: editMode=patch without findText surfaces server's 400 verbatim, never silently replaces", async () => {
+    // Server returns the validation error straight up; plugin must NOT
+    // rewrite it into a successful full-document replace. We assert the
+    // error string flows through so the agent knows exactly what to fix.
+    const fetchMock = vi.fn().mockResolvedValue(
+      errorJsonResponse(
+        {
+          ok: false,
+          error: "validation_error",
+          status: 400,
+          message: "findText is required when using patch editMode",
+        },
+        400,
+        "Bad Request",
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_doc_update");
+
+    const result = await tool.execute("test-call-id", {
+      id: "doc-id",
+      text: "replacement body",
+      editMode: "patch",
+    });
+
+    const details = unwrapDetails(result);
+    expect(details.error).toContain("findText is required when using patch editMode");
+    expect(details.error).toContain("400");
+    expect(details).not.toHaveProperty("ok", true);
+    // The plugin must not have silently turned this into a replace — the
+    // body MUST NOT contain a synthetic "ok:true" and findText MUST NOT
+    // have been silently defaulted to something truthy.
+    expect(JSON.stringify(details)).not.toContain('"ok":true');
+  });
+
+  test("CP-3322: editMode=patch + non-matching findText surfaces server's 404 verbatim (no silent replace)", async () => {
+    // Outline's applyMarkdownToDocument throws ValidationError when findText
+    // doesn't match; the route layer translates that to 404. The plugin
+    // must propagate that error so the caller can fix the anchor — never
+    // silently overwrite the document.
+    const fetchMock = vi.fn().mockResolvedValue(
+      errorJsonResponse(
+        {
+          ok: false,
+          error: "not_found",
+          status: 404,
+          message: "The specified text was not found in the document",
+        },
+        404,
+        "Not Found",
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_doc_update");
+
+    const result = await tool.execute("test-call-id", {
+      id: "doc-id",
+      text: "whatever",
+      editMode: "patch",
+      findText: "no-such-anchor-xyz",
+    });
+
+    const details = unwrapDetails(result);
+    expect(details.error).toContain("not found");
+    expect(details.error).toContain("404");
+    expect(details).not.toHaveProperty("ok", true);
+  });
+
+  test("CP-3322: editMode defaults to 'replace' when omitted (regression — default behavior unchanged)", async () => {
+    const updated = { id: "doc-id", title: "T" };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_doc_update");
+
+    // No editMode supplied — must still default to replace (pre-CP-3322
+    // behavior, do NOT change the default).
+    await tool.execute("test-call-id", { id: "doc-id", text: "new body" });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      id: "doc-id",
+      text: "new body",
+      editMode: "replace",
+    });
+  });
+
+  test("CP-3322: editMode=append does NOT require findText (findText is patch-only)", async () => {
+    const updated = { id: "doc-id" };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("outline_doc_update");
+
+    await tool.execute("test-call-id", {
+      id: "doc-id",
+      text: "\n## new section",
+      editMode: "append",
+    });
+
+    // Wire body should NOT carry findText for non-patch modes — keeping the
+    // body clean matches the semantics that the server only consults
+    // findText when editMode=patch.
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      id: "doc-id",
+      text: "\n## new section",
+      editMode: "append",
+    });
+  });
 });
