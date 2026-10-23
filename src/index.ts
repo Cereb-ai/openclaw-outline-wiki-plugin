@@ -188,7 +188,12 @@ export default defineToolPlugin({
         "- `replace` (default) — overwrite the entire document body with `text`. Most expensive in tokens (caller sends full body, server echoes it back); preferred only when rewriting the whole doc.\n" +
         "- `append` — append `text` to the end of the document. Cheap (caller sends only the delta); preferred for adding new sections.\n" +
         "- `prepend` — prepend `text` to the start of the document. Cheap; preferred for adding a header block above existing content.\n" +
-        "- `patch` — find `findText` in the existing document and replace it with `text`. Cheapest for in-place edits (caller sends only the changed region). **Requires `findText`**; server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when `findText` does not match — never silently replaces the whole document. Use `outline_doc_get` first to read the current body and pick an exact, unique substring.",
+        "- `patch` — find `findText` in the existing document and replace it with `text`. Cheapest for in-place edits (caller sends only the changed region). **Requires `findText`**; server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when `findText` does not match — never silently replaces the whole document. Use `outline_doc_get` first to read the current body and pick an exact, unique substring.\n\n" +
+        "**CP-3689 patch guardrail** (applies to `editMode=patch` only; MCP and CLI behave identically):\n" +
+        "- PRE-submit: the plugin reads the current body and requires `findText` to match EXACTLY ONCE (literal, non-fuzzy). 0 matches or >1 matches → the call fails with a clear error and **no `documents.update` request is sent**. The server replaces only the FIRST occurrence, so a duplicated anchor would otherwise edit the wrong region silently.\n" +
+        "- POST-submit: the plugin reads the body back and compares the replaced region with the submitted text. A mismatch is reported in `warnings[]` plus `patchVerification` (`verified: false` + `storedRegion` = what the server actually stored). Routine server-side markdown normalization (e.g. `_italic_` → `*italic*`) is reported as `verified: true, normalized: true` — it is NOT an error.\n" +
+        "- IMPORTANT: the server rewrites some markdown. A code span nested inside bold (submitted `` **`code`** ``) is stored with the emphasis markers moved (`` `**code**` ``) — the write still returns `ok: true`, but the body comes back mangled and the original anchor then 404s, so the change can no longer be undone with another patch. Write bold and code spans SEPARATELY (`**bold** `code``) instead of nesting them.\n" +
+        "- When `patchVerification.verified` is `false`, do NOT retry with the same anchor — it is stale. Re-read the document and repair it with `editMode: \"replace\"`.",
       parameters: Type.Object({
         id: Type.String({ description: "Outline document UUID." }),
         title: Type.Optional(Type.String({ description: "New title." })),
@@ -208,7 +213,7 @@ export default defineToolPlugin({
         findText: Type.Optional(
           Type.String({
             description:
-              "Required when `editMode=patch`. The exact markdown substring to locate and replace in the current document body. Server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when not matched — it NEVER silently falls back to a full-document replace. Read the body via `outline_doc_get` first to pick a substring that is unique enough to be a safe anchor.",
+              "Required when `editMode=patch`. The exact markdown substring to locate and replace in the current document body. Server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when not matched — it NEVER silently falls back to a full-document replace. Read the body via `outline_doc_get` first to pick a substring that is unique enough to be a safe anchor. CP-3689: the plugin additionally requires the anchor to match EXACTLY ONCE in the current body (literal match) before sending any update; 0 or >1 matches → hard error, no update is sent.",
           }),
         ),
         publish: Type.Optional(Type.Boolean({ description: "Publish on update." })),

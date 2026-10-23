@@ -1,7 +1,7 @@
 # @cereb/outline-wiki-openclaw-plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](package.json)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-%3E%3D2026.5.17-purple.svg)](https://docs.openclaw.ai)
 
 OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named tools** (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy single-dispatcher pattern with one named tool per Outline REST method.
@@ -22,7 +22,7 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 | `outline_doc_list` | list documents (metadata only — `text` stripped, see Response-trim contract below) | — |
 | `outline_doc_get` | single document + full markdown body | `id` |
 | `outline_doc_create` | create document (publish=true default; accepts `parentDocumentId`); `collectionId` falls back to `defaultCollectionId` config; verifies result via `documents.info`; **response trims `document.text`** (CP-2379 — round-trip trim) | `title`, `text`, `collectionId` (or `defaultCollectionId` config) |
-| `outline_doc_update` | update text / title. `editMode` picks how `text` is applied — `replace` (default, full overwrite) / `append` / `prepend` / `patch` (`patch` requires `findText`; server returns 400 if missing or 404 if not matched — never silently replaces the whole document); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent); **response trims `document.text`** (CP-2379 — round-trip trim) | `id` + (`text` or `title`) |
+| `outline_doc_update` | update text / title. `editMode` picks how `text` is applied — `replace` (default, full overwrite) / `append` / `prepend` / `patch` (`patch` requires `findText`; server returns 400 if missing or 404 if not matched — never silently replaces the whole document); supports `publish`, `changelog` (best-effort revision-name write), `strictChangelog`; **rejects `parentDocumentId`** (use `outline_doc_move` to reparent); **response trims `document.text`** (CP-2379 — round-trip trim). **CP-3689 patch guardrail**: for `editMode=patch` the plugin requires `findText` to match exactly once before sending any update (0 or >1 matches → error, no write) and reads the body back afterwards to verify the change landed (`patchVerification` + `warnings`) | `id` + (`text` or `title`) |
 | `outline_doc_delete` | trash (default) or hard-delete (`permanent: true`, requires already-trashed) | `id` |
 | `outline_doc_archive` | move to archive (admin-readable, recoverable) | `id` |
 | `outline_doc_restore` | restore from archive | `id` |

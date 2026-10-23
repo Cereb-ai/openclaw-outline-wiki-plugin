@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-23
+
+### Added
+- `outline_doc_update` gained a **patch guardrail** for `editMode=patch` (CP-3689). The plugin now reads the current document body before the update and requires `findText` to match **exactly once** (literal, non-fuzzy match). 0 matches or >1 matches fail with an explicit error and **no `documents.update` request is sent**. After a successful update the plugin reads the body back and compares the replaced region with the submitted text; a mismatch is reported in `warnings[]` plus a new `patchVerification` payload (`verified` / `exact` / `normalized` / `skipped` / `storedRegion`).
+- New shared module `src/patch-guard.ts` — the guardrail logic, used by both the OpenClaw tool (`src/index.ts`) and the CLI (`src/cli.ts`) so the two paths cannot drift.
+
+### Fixed
+- A patch whose anchor occurs more than once no longer silently edits the **first** occurrence (the Outline server replaces only the first match) — the call now fails before any write happens.
+- A patch whose replacement text the Outline server rewrites (e.g. a code span nested inside bold: submitted `` **`code`** `` is stored as `` `**code**` ``) no longer returns a bare `ok: true`. The write still succeeds server-side, but the response now carries an explicit warning and `patchVerification.verified: false` with the region the server actually stored, so the caller knows the anchor is stale and that the change can no longer be undone with another patch.
+
+### Changed
+- `skills/outline-wiki/SKILL.md` — new pitfall entries: “patch 避免粗体与 code span 混排” (with a copy-paste-safe replacement form and a table of the markdown constructs the server rewrites) and “`editMode=patch` 护栏 (v0.5.3+)” (preflight three-state + read-back semantics). The CLI ↔ MCP behaviour table gained two rows for the guardrail.
+- `outline_doc_update` tool description documents the guardrail and the markdown-rewrite hazard.
+- The guardrail applies to `editMode=patch` only. `replace` / `append` / `prepend` semantics are unchanged, and a patch now costs two extra reads (`documents.info` before and after the write).
+
+### Notes
+- Root cause is **server-side**, not plugin-side: the Outline server round-trips the submitted markdown through its own serializer (not the identity for some constructs) and replaces only the first `findText` match. Verified against the dev wiki on 2026-10-23 — `documents.create`, `documents.update` (`replace`) and `documents.update` (`patch`) all corrupt the same input the same way. The plugin cannot fix the stored bytes; it can only refuse to write when the anchor is unsafe and to report when the server changed the submitted text.
+
 ## [0.5.2] - 2026-09-19
 
 ### Added
