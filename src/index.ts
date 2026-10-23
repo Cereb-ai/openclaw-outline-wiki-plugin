@@ -39,6 +39,11 @@
 import { readFile } from "node:fs/promises";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import {
+  runPatchPreflight,
+  runPatchVerification,
+  type PatchVerificationResult,
+} from "./patch-guard.js";
 
 const PLUGIN_ID = "outline-wiki-openclaw-plugin";
 const EMPTY_CREATE_RESPONSE_ERROR =
@@ -183,7 +188,12 @@ export default defineToolPlugin({
         "- `replace` (default) — overwrite the entire document body with `text`. Most expensive in tokens (caller sends full body, server echoes it back); preferred only when rewriting the whole doc.\n" +
         "- `append` — append `text` to the end of the document. Cheap (caller sends only the delta); preferred for adding new sections.\n" +
         "- `prepend` — prepend `text` to the start of the document. Cheap; preferred for adding a header block above existing content.\n" +
-        "- `patch` — find `findText` in the existing document and replace it with `text`. Cheapest for in-place edits (caller sends only the changed region). **Requires `findText`**; server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when `findText` does not match — never silently replaces the whole document. Use `outline_doc_get` first to read the current body and pick an exact, unique substring.",
+        "- `patch` — find `findText` in the existing document and replace it with `text`. Cheapest for in-place edits (caller sends only the changed region). **Requires `findText`**; server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when `findText` does not match — never silently replaces the whole document. Use `outline_doc_get` first to read the current body and pick an exact, unique substring.\n\n" +
+        "**CP-3689 patch guardrail** (applies to `editMode=patch` only; MCP and CLI behave identically):\n" +
+        "- PRE-submit: the plugin reads the current body and requires `findText` to match EXACTLY ONCE (literal, non-fuzzy). 0 matches or >1 matches → the call fails with a clear error and **no `documents.update` request is sent**. The server replaces only the FIRST occurrence, so a duplicated anchor would otherwise edit the wrong region silently.\n" +
+        "- POST-submit: the plugin reads the body back and compares the replaced region with the submitted text. A mismatch is reported in `warnings[]` plus `patchVerification` (`verified: false` + `storedRegion` = what the server actually stored). Routine server-side markdown normalization (e.g. `_italic_` → `*italic*`) is reported as `verified: true, normalized: true` — it is NOT an error.\n" +
+        "- IMPORTANT: the server rewrites some markdown. A code span nested inside bold (submitted `` **`code`** ``) is stored with the emphasis markers moved (`` `**code**` ``) — the write still returns `ok: true`, but the body comes back mangled and the original anchor then 404s, so the change can no longer be undone with another patch. Write bold and code spans SEPARATELY (`**bold** `code``) instead of nesting them.\n" +
+        "- When `patchVerification.verified` is `false`, do NOT retry with the same anchor — it is stale. Re-read the document and repair it with `editMode: \"replace\"`.",
       parameters: Type.Object({
         id: Type.String({ description: "Outline document UUID." }),
         title: Type.Optional(Type.String({ description: "New title." })),
@@ -203,7 +213,7 @@ export default defineToolPlugin({
         findText: Type.Optional(
           Type.String({
             description:
-              "Required when `editMode=patch`. The exact markdown substring to locate and replace in the current document body. Server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when not matched — it NEVER silently falls back to a full-document replace. Read the body via `outline_doc_get` first to pick a substring that is unique enough to be a safe anchor.",
+              "Required when `editMode=patch`. The exact markdown substring to locate and replace in the current document body. Server returns `400 validation_error: findText is required when using patch editMode` when missing, or `404 not_found` when not matched — it NEVER silently falls back to a full-document replace. Read the body via `outline_doc_get` first to pick a substring that is unique enough to be a safe anchor. CP-3689: the plugin additionally requires the anchor to match EXACTLY ONCE in the current body (literal match) before sending any update; 0 or >1 matches → hard error, no update is sent.",
           }),
         ),
         publish: Type.Optional(Type.Boolean({ description: "Publish on update." })),
@@ -777,6 +787,56 @@ async function docUpdate(
     body.findText = args.findText;
   }
 
+  // ===== CP-3689: patch guardrail =====
+  //
+  // Two server-side behaviours make a naive patch dangerous (both reproduced
+  // against the dev wiki on 2026-10-23):
+  //
+  //   (1) The server replaces only the FIRST occurrence of `findText`. A
+  //       duplicated anchor therefore silently edits the wrong region.
+  //   (2) The server round-trips the submitted markdown through its own
+  //       serializer, which is not the identity for some constructs — most
+  //       dangerously a code span nested inside bold (submitted
+  //       `**`code`**` is stored as `` `**code**` ``). The write returns
+  //       HTTP 200 / ok:true, but the body comes back mangled and the
+  //       original anchor then 404s, so the agent cannot repair the
+  //       document with another patch.
+  //
+  // PRE-submit: read the current body and require `findText` to match
+  // EXACTLY ONCE. 0 matches or >1 matches → hard error, NO update call is
+  // sent. This is the only way to fail safely: once the write lands, the
+  // mangled body is already stored.
+  //
+  // POST-submit: read the body back and compare the changed region with the
+  // submitted text. A mismatch is reported as an explicit warning plus a
+  // `patchVerification` payload.
+  //
+  // Only editMode=patch is guarded — replace / append / prepend have no
+  // anchor to verify and are untouched by this change.
+  const isPatch = body.editMode === "patch";
+  let patchBeforeBody: string | null = null;
+  if (isPatch) {
+    const findText = typeof args.findText === "string" ? args.findText : "";
+    if (findText.length === 0) {
+      // The server would answer `400 validation_error: findText is required
+      // when using patch editMode` anyway; failing here with the same
+      // wording keeps the error contract stable while saving a round-trip.
+      return textResult({
+        error:
+          "outline_doc_update patch preflight failed: 400 validation_error: findText is required when using patch editMode — no update was sent.",
+      });
+    }
+    const preflight = await runPatchPreflight(
+      args.id,
+      findText,
+      (id) => fetchDocText(cfg, id),
+    );
+    if (!preflight.ok) {
+      return textResult({ error: preflight.error });
+    }
+    patchBeforeBody = preflight.body;
+  }
+
   // Track warnings for best-effort post-update side-effects (e.g. changelog
   // writing via revisions.update). Non-fatal — main update succeeds even if
   // these fail; we just collect the messages and surface them in the
@@ -786,6 +846,29 @@ async function docUpdate(
   try {
     const data = await outlineFetch(cfg, "documents.update", body);
     const updated = data?.data ?? null;
+
+    // ===== CP-3689: post-submit read-back verification =====
+    //
+    // The update already landed. Re-read the body and compare the region
+    // the server actually stored with the text we submitted. A mismatch
+    // (the server rewrote our markdown) is surfaced as an explicit warning
+    // plus a `patchVerification` payload — the caller needs to know that the
+    // anchor it holds is now stale.
+    let patchVerification: PatchVerificationResult | undefined;
+    if (isPatch && patchBeforeBody !== null && typeof body.text === "string") {
+      patchVerification = await runPatchVerification(
+        args.id,
+        patchBeforeBody,
+        body.text,
+        (id) => fetchDocText(cfg, id),
+      );
+      if (!patchVerification.verified) {
+        warnings.push(
+          patchVerification.reason ??
+            "patch verification failed: the stored text does not match the submitted replacement text.",
+        );
+      }
+    }
 
     // Best-effort changelog: if the caller provided `changelog`, look up the
     // latest revision for this document and write the string into its `name`
@@ -834,6 +917,8 @@ async function docUpdate(
           }
         : null,
       warnings: warnings.length > 0 ? warnings : undefined,
+      // CP-3689: patch read-back result (only for editMode=patch).
+      patchVerification: patchVerification ?? undefined,
     });
   } catch (err) {
     return textResult({ error: `documents.update failed: ${errorMessage(err)}` });
@@ -1583,6 +1668,26 @@ async function writeChangelog(
       warning: `changelog write skipped: revisions.update failed for revision ${latest.id}: ${errorMessage(err)}`,
     };
   }
+}
+
+/**
+ * Read the current markdown body of a document (CP-3689).
+ *
+ * Used by the patch guardrail: before a patch we need the body the anchor
+ * must match against, and after a patch we need it again to verify what the
+ * server actually stored. Throws on any failure — the callers decide
+ * whether to fail closed (preflight) or degrade to a warning (verification).
+ */
+async function fetchDocText(
+  cfg: OutlineWikiConfig,
+  id: string,
+): Promise<string> {
+  const info = await outlineFetch(cfg, "documents.info", { id });
+  const text = info?.data?.text;
+  if (typeof text !== "string") {
+    throw new Error("documents.info returned no text for the document");
+  }
+  return text;
 }
 
 /**

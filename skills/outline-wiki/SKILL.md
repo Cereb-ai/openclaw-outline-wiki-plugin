@@ -252,6 +252,48 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 
 6. **避免整篇 replace (省 token)**: 修改大文档时优先用 `patch` (定点替换) 或 `append`/`prepend` (增量追加), 而不是 `replace` (整篇覆盖). 实测一篇 ~10k 字符的长文档做一行 typo 修正: `replace` 调用方要发整篇 + 服务端会原样 echo (`document.text` 已 CP-2379 裁掉, 但调用方 wire 流量 = 全文); `patch` 只发要改的子串 + 锚点, 通常 < 200 字符. 比例 ~50:1.
 
+7. **patch 避免粗体与 code span 混排 (服务端会把标记错位)**: Outline 服务端会把提交的 markdown 过一遍自己的序列化器, 某些写法会被**改写**, 且写入照样返 `200 ok:true` —— 不回读就发现不了. 最尖锐的一种是 **code span 嵌在粗体里**:
+
+   ```
+   ❌ 提交:  **`config.yaml`**        ← 服务端落库:  `**config.yaml**`   (标记错位, 渲染成乱码)
+   ✅ 提交:  **config.yaml**          ← 落库一致
+   ✅ 提交:  `config.yaml`            ← 落库一致
+   ```
+
+   其它实测会被改写的写法 (dev wiki, 2026-10-23):
+
+   | 提交 | 服务端落库 | 说明 |
+   |---|---|---|
+   | `**`code`**` | `**code**` | code span 嵌粗体 → 标记错位 (**WTO-4264 的乱码同源**) |
+   | `**前缀 `code` 后缀**` | `**前缀** `**code**` **后缀**` | 粗体里含 code span → 被拆成 3 段 |
+   | `_italic_` | `*italic*` | 下划线斜体 → 星号斜体 (无害, 但锚点会失效) |
+   | `- item` | `* item` | 无序列表符号 → 星号 (无害, 但锚点会失效) |
+   | `\| a \| b \|` 表格 | 列宽重新对齐 | 表格 padding (无害, 但锚点会失效) |
+
+   **可复制的替换写法**: 把 code span 和粗体**分开写**, 中间留空格, 不要嵌套:
+
+   ```
+   ✅ **Authorization: Bearer** `X-Auth-User`
+   ✅ `Authorization: Bearer` **header**
+   ✅ **前缀** `code` **后缀**
+   ❌ **`Authorization: Bearer`**
+   ❌ **前缀 `code` 后缀**
+   ```
+
+   **改坏后救不回来**: 落库已被改写, 再用同一份原文做 `findText` 会 `404 not_found` —— 只能用 `editMode: "replace"` 整篇回写 + 逐行 diff 自救. 所以**先写对**比事后救便宜得多.
+
+8. **`editMode=patch` 护栏 (v0.5.3+)**: 插件现在自带两层护栏, MCP 与 CLI 行为一致.
+
+   - **提交前**: 插件先读一次正文, 要求 `findText` **恰好命中一次** (字面匹配, 非模糊).
+     - 命中 0 次 → 直接报错, **不发出 update 调用** (错误里带 `404 not_found` 字样)
+     - 命中 >1 次 → 直接报错, **不发出 update 调用** (错误里带 `matched N times` 字样) — 因为服务端只替换**第一个**命中, 重复锚点会改错地方
+   - **提交后**: 插件回读正文, 比对被替换区域与提交文本.
+     - 一致 → `patchVerification.verified: true`
+     - 只是被服务端常规归一化 (如 `_italic_` → `*italic*`) → `verified: true` + `normalized: true`, **不算错**
+     - 真被改写 (如 code span 错位) → `verified: false` + `warnings[]` 明确告警, `storedRegion` 给出服务端实际存了什么
+
+   调用方看到 `patchVerification.verified: false` 时**不要再用旧锚点 patch** (锚点已失效), 应改用 `editMode: "replace"` 整篇回写.
+
 ---
 
 ## 配置检查 (没配好时返的友好错误)
@@ -298,6 +340,8 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 | `outline_doc_create` 成功后 verify | 调 `documents.info` 确认 `data.id` 非空; 失败 → 返回 error | 同左 |
 | `outline_doc_update.editMode` | 接受 `editMode` ∈ {`replace`(默认) / `append` / `prepend` / `patch`}; plugin 完全透传, 不做白名单 (上游 Outline 才是 source of truth). patch 模式下必须带 `findText` | 同左 |
 | `outline_doc_update.findText` | 接受 `findText` (可选 string); 仅在 `editMode=patch` 下有意义 — 服务端 400 (缺) / 404 (未命中), 不会静默整篇 replace | 同左 |
+| `outline_doc_update` patch 预检 (CP-3689) | `editMode=patch` 时先读正文, 要求 `findText` 恰好命中一次; 0 次 / >1 次 → 报错且**不发出** update | 同左 |
+| `outline_doc_update` patch 回读 (CP-3689) | update 后回读正文比对; 不一致 → `warnings[]` + `patchVerification.verified=false` | 同左 |
 | `outline_doc_update.publish` | 接受 `publish` (boolean, 可选) | 同左 |
 | `outline_doc_update.changelog` | 接受 `changelog` (可选 string), best-effort 写入最新 revision `name` | 同左 |
 | `outline_doc_update.strictChangelog` | 接受 `strictChangelog` (bool, 默认 false); `true` 时 changelog 写失败 → 返回硬失败 | 同左 |

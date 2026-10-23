@@ -409,17 +409,28 @@ describe("CLI ↔ MCP parity: request body construction", () => {
         editMode: "patch",
         findText: "old wording",
       };
+      // CP-3689: the patch path reads the current body first (anchor
+      // preflight) and reads it back afterwards (verification), so the
+      // mock has to answer documents.info twice plus the update.
+      const infoResp = () =>
+        jsonResponse({ data: { id: "doc-id", text: "old wording" } });
       const mcp = await captureMcpBodies("outline_doc_update", args, [
+        infoResp(),
         jsonResponse({ data: updated }),
+        infoResp(),
       ]);
       const cli = await captureCliBodies(
         () => dispatchDoc("update", args, cfg) as Promise<unknown>,
-        [jsonResponse({ data: updated })],
+        [infoResp(), jsonResponse({ data: updated }), infoResp()],
       );
       // Wire body MUST be identical between MCP and CLI — the whole point
       // of the parity suite.
-      expect(cli[0]).toEqual(mcp[0]);
-      expect(cli[0]).toEqual({
+      const mcpUpdate = mcp.find((b) => b.editMode === "patch");
+      const cliUpdate = cli.find((b) => b.editMode === "patch");
+      expect(mcpUpdate).toBeDefined();
+      expect(cliUpdate).toBeDefined();
+      expect(cliUpdate).toEqual(mcpUpdate);
+      expect(cliUpdate).toEqual({
         id: "doc-id",
         text: "new wording",
         editMode: "patch",
