@@ -39,6 +39,11 @@
 import { readFile } from "node:fs/promises";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import {
+  runPatchPreflight,
+  runPatchVerification,
+  type PatchVerificationResult,
+} from "./patch-guard.js";
 
 const PLUGIN_ID = "outline-wiki-openclaw-plugin";
 const EMPTY_CREATE_RESPONSE_ERROR =
@@ -777,6 +782,56 @@ async function docUpdate(
     body.findText = args.findText;
   }
 
+  // ===== CP-3689: patch guardrail =====
+  //
+  // Two server-side behaviours make a naive patch dangerous (both reproduced
+  // against the dev wiki on 2026-10-23):
+  //
+  //   (1) The server replaces only the FIRST occurrence of `findText`. A
+  //       duplicated anchor therefore silently edits the wrong region.
+  //   (2) The server round-trips the submitted markdown through its own
+  //       serializer, which is not the identity for some constructs — most
+  //       dangerously a code span nested inside bold (submitted
+  //       `**`code`**` is stored as `` `**code**` ``). The write returns
+  //       HTTP 200 / ok:true, but the body comes back mangled and the
+  //       original anchor then 404s, so the agent cannot repair the
+  //       document with another patch.
+  //
+  // PRE-submit: read the current body and require `findText` to match
+  // EXACTLY ONCE. 0 matches or >1 matches → hard error, NO update call is
+  // sent. This is the only way to fail safely: once the write lands, the
+  // mangled body is already stored.
+  //
+  // POST-submit: read the body back and compare the changed region with the
+  // submitted text. A mismatch is reported as an explicit warning plus a
+  // `patchVerification` payload.
+  //
+  // Only editMode=patch is guarded — replace / append / prepend have no
+  // anchor to verify and are untouched by this change.
+  const isPatch = body.editMode === "patch";
+  let patchBeforeBody: string | null = null;
+  if (isPatch) {
+    const findText = typeof args.findText === "string" ? args.findText : "";
+    if (findText.length === 0) {
+      // The server would answer `400 validation_error: findText is required
+      // when using patch editMode` anyway; failing here with the same
+      // wording keeps the error contract stable while saving a round-trip.
+      return textResult({
+        error:
+          "outline_doc_update patch preflight failed: 400 validation_error: findText is required when using patch editMode — no update was sent.",
+      });
+    }
+    const preflight = await runPatchPreflight(
+      args.id,
+      findText,
+      (id) => fetchDocText(cfg, id),
+    );
+    if (!preflight.ok) {
+      return textResult({ error: preflight.error });
+    }
+    patchBeforeBody = preflight.body;
+  }
+
   // Track warnings for best-effort post-update side-effects (e.g. changelog
   // writing via revisions.update). Non-fatal — main update succeeds even if
   // these fail; we just collect the messages and surface them in the
@@ -786,6 +841,29 @@ async function docUpdate(
   try {
     const data = await outlineFetch(cfg, "documents.update", body);
     const updated = data?.data ?? null;
+
+    // ===== CP-3689: post-submit read-back verification =====
+    //
+    // The update already landed. Re-read the body and compare the region
+    // the server actually stored with the text we submitted. A mismatch
+    // (the server rewrote our markdown) is surfaced as an explicit warning
+    // plus a `patchVerification` payload — the caller needs to know that the
+    // anchor it holds is now stale.
+    let patchVerification: PatchVerificationResult | undefined;
+    if (isPatch && patchBeforeBody !== null && typeof body.text === "string") {
+      patchVerification = await runPatchVerification(
+        args.id,
+        patchBeforeBody,
+        body.text,
+        (id) => fetchDocText(cfg, id),
+      );
+      if (!patchVerification.verified) {
+        warnings.push(
+          patchVerification.reason ??
+            "patch verification failed: the stored text does not match the submitted replacement text.",
+        );
+      }
+    }
 
     // Best-effort changelog: if the caller provided `changelog`, look up the
     // latest revision for this document and write the string into its `name`
@@ -834,6 +912,8 @@ async function docUpdate(
           }
         : null,
       warnings: warnings.length > 0 ? warnings : undefined,
+      // CP-3689: patch read-back result (only for editMode=patch).
+      patchVerification: patchVerification ?? undefined,
     });
   } catch (err) {
     return textResult({ error: `documents.update failed: ${errorMessage(err)}` });
@@ -1583,6 +1663,26 @@ async function writeChangelog(
       warning: `changelog write skipped: revisions.update failed for revision ${latest.id}: ${errorMessage(err)}`,
     };
   }
+}
+
+/**
+ * Read the current markdown body of a document (CP-3689).
+ *
+ * Used by the patch guardrail: before a patch we need the body the anchor
+ * must match against, and after a patch we need it again to verify what the
+ * server actually stored. Throws on any failure — the callers decide
+ * whether to fail closed (preflight) or degrade to a warning (verification).
+ */
+async function fetchDocText(
+  cfg: OutlineWikiConfig,
+  id: string,
+): Promise<string> {
+  const info = await outlineFetch(cfg, "documents.info", { id });
+  const text = info?.data?.text;
+  if (typeof text !== "string") {
+    throw new Error("documents.info returned no text for the document");
+  }
+  return text;
 }
 
 /**

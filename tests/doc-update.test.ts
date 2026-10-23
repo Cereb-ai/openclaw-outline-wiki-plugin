@@ -220,7 +220,18 @@ describe("outline_doc_update", () => {
       revision: 5,
       updatedAt: "2026-09-19T05:00:00.000Z",
     };
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: updated }));
+    // CP-3689: the patch path now reads the current body first (anchor
+    // preflight) and reads it back afterwards (verification). So the mock
+    // has to answer documents.info twice plus the update itself.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { id: "doc-id", text: "old wording" } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: updated }))
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { id: "doc-id", text: "new wording" } }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const tool = getTool("outline_doc_update");
 
@@ -231,13 +242,16 @@ describe("outline_doc_update", () => {
       findText: "old wording",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "https://outline.example.test/api/documents.update",
+      "https://outline.example.test/api/documents.info",
     );
+    const updateCall = fetchMock.mock.calls.find(
+      (c) => c[0] === "https://outline.example.test/api/documents.update",
+    );
+    expect(updateCall).toBeDefined();
     // The wire body MUST carry findText — pre-CP-3322 this would silently
     // drop it and the server would 400 with "findText is required".
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+    expect(JSON.parse(updateCall[1].body)).toEqual({
       id: "doc-id",
       text: "new wording",
       editMode: "patch",
@@ -258,6 +272,10 @@ describe("outline_doc_update", () => {
     // Server returns the validation error straight up; plugin must NOT
     // rewrite it into a successful full-document replace. We assert the
     // error string flows through so the agent knows exactly what to fix.
+    //
+    // CP-3689: the preflight now catches the missing findText locally
+    // (same wording, no round-trip) — the server error text must still be
+    // part of the message so existing callers keep working.
     const fetchMock = vi.fn().mockResolvedValue(
       errorJsonResponse(
         {
@@ -294,17 +312,12 @@ describe("outline_doc_update", () => {
     // doesn't match; the route layer translates that to 404. The plugin
     // must propagate that error so the caller can fix the anchor — never
     // silently overwrite the document.
+    //
+    // CP-3689: the preflight now detects the non-matching anchor locally
+    // (the server body does not contain it) and refuses to send the
+    // update at all — the message keeps the 404 / not-found wording.
     const fetchMock = vi.fn().mockResolvedValue(
-      errorJsonResponse(
-        {
-          ok: false,
-          error: "not_found",
-          status: 404,
-          message: "The specified text was not found in the document",
-        },
-        404,
-        "Not Found",
-      ),
+      jsonResponse({ data: { id: "doc-id", text: "a body without the anchor" } }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const tool = getTool("outline_doc_update");
@@ -320,6 +333,12 @@ describe("outline_doc_update", () => {
     expect(details.error).toContain("not found");
     expect(details.error).toContain("404");
     expect(details).not.toHaveProperty("ok", true);
+    // The guardrail must not have sent the update — a silent full-document
+    // replace is exactly what this test guards against.
+    const updateCalls = fetchMock.mock.calls.filter(
+      (c) => c[0] === "https://outline.example.test/api/documents.update",
+    );
+    expect(updateCalls).toHaveLength(0);
   });
 
   test("CP-3322: editMode defaults to 'replace' when omitted (regression — default behavior unchanged)", async () => {

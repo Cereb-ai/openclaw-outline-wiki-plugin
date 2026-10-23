@@ -43,6 +43,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  runPatchPreflight,
+  runPatchVerification,
+} from "./patch-guard.js";
 
 // 100% parity with the OpenClaw native MCP tool names (outline_*).
 const MCP_ALIASES: Record<string, string> = {
@@ -346,6 +350,41 @@ async function dispatchDoc(
         body.findText = args.findText;
       }
 
+      // ===== CP-3689: patch guardrail — mirrors src/index.ts docUpdate =====
+      //
+      // PRE-submit: `findText` must match EXACTLY ONCE in the current body
+      // (the server replaces only the first occurrence, and a stale anchor
+      // can only be diagnosed after the write already landed). 0 or >1
+      // matches → hard error, NO documents.update call is sent.
+      //
+      // POST-submit: read the body back and compare the changed region with
+      // the submitted text — the server rewrites some markdown constructs
+      // (a code span nested inside bold comes back with the emphasis
+      // markers moved), which would otherwise go unnoticed behind an
+      // HTTP 200 / ok:true.
+      const isPatch = body.editMode === "patch";
+      let patchBeforeBody = null;
+      if (isPatch) {
+        const findText = typeof args.findText === "string" ? args.findText : "";
+        if (findText.length === 0) {
+          // The server would answer `400 validation_error: findText is
+          // required when using patch editMode` anyway; failing here with
+          // the same wording keeps the error contract stable (and saves a
+          // round-trip).
+          return textResult({
+            error:
+              "outline_doc_update patch preflight failed: 400 validation_error: findText is required when using patch editMode — no update was sent.",
+          });
+        }
+        const preflight = await runPatchPreflight(args.id, findText, (id) =>
+          fetchDocText(cfg, id),
+        );
+        if (!preflight.ok) {
+          return textResult({ error: preflight.error });
+        }
+        patchBeforeBody = preflight.body;
+      }
+
       const warnings = [];
       let data;
       try {
@@ -354,6 +393,23 @@ async function dispatchDoc(
         return textResult({ error: `documents.update failed: ${(err).message}` });
       }
       const updated = data?.data ?? null;
+
+      // ===== CP-3689: post-submit read-back verification — mirrors src/index.ts =====
+      let patchVerification;
+      if (isPatch && patchBeforeBody !== null && typeof body.text === "string") {
+        patchVerification = await runPatchVerification(
+          args.id,
+          patchBeforeBody,
+          body.text,
+          (id) => fetchDocText(cfg, id),
+        );
+        if (!patchVerification.verified) {
+          warnings.push(
+            patchVerification.reason ??
+              "patch verification failed: the stored text does not match the submitted replacement text.",
+          );
+        }
+      }
 
       // Best-effort changelog write (mirrors index.ts writeChangelog).
       if (typeof args.changelog === "string" && args.changelog.length > 0) {
@@ -394,6 +450,8 @@ async function dispatchDoc(
             }
           : null,
         warnings: warnings.length > 0 ? warnings : undefined,
+        // CP-3689: patch read-back result (only for editMode=patch).
+        patchVerification: patchVerification ?? undefined,
       });
     }
     case "delete": {
@@ -752,6 +810,24 @@ async function outlineFetch(
     throw new Error(`Outline API ${res.status}: ${errText.slice(0, 300)}`);
   }
   return res.json();
+}
+
+/**
+ * Read the current markdown body of a document (CP-3689).
+ *
+ * Mirrors src/index.ts `fetchDocText` — the patch guardrail needs the body
+ * before the write (anchor preflight) and after it (read-back verification).
+ */
+async function fetchDocText(
+  cfg: { apiToken: string; endpoint: string },
+  id: string,
+): Promise<string> {
+  const data = await outlineFetch(cfg, "documents.info", { id });
+  const text = data?.data?.text;
+  if (typeof text !== "string") {
+    throw new Error("documents.info returned no text for the document");
+  }
+  return text;
 }
 
 function textResult(data: Record<string, unknown>): { content: { type: string; text: string }[]; details: Record<string, unknown>; isError: boolean } {
