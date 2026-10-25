@@ -1,8 +1,8 @@
 {
   "name": "@cereb/outline-wiki-openclaw-plugin",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "type": "module",
-  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.4: CP-3730 SKILL.md frontmatter BAD_INDENT fix — description converted to a YAML block scalar so the outline-wiki skill is no longer skipped at startup)",
+  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.5: CP-3752 parameter normalization — ID parameters accept string|number, pagination accepts number|numeric string and clamps to the Outline API maximum; content parameters stay strict)",
   "license": "MIT",
   "author": {
     "name": "Leo Wang",

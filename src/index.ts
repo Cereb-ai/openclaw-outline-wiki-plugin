@@ -44,6 +44,14 @@ import {
   runPatchVerification,
   type PatchVerificationResult,
 } from "./patch-guard.js";
+import {
+  normalizeId,
+  normalizeLimit,
+  normalizeOffset,
+  normalizeOptionalId,
+  OUTLINE_MAX_LIMIT,
+  REV_LOG_MAX_LIMIT,
+} from "./param-normalize.js";
 
 const PLUGIN_ID = "outline-wiki-openclaw-plugin";
 const EMPTY_CREATE_RESPONSE_ERROR =
@@ -57,6 +65,56 @@ const ATTACHMENT_PRESETS = [
   "avatar",
   "emoji",
 ] as const;
+
+// ===== CP-3752: lenient parameter schemas =====
+//
+// ID-like parameters (`id`, `collectionId`, `parentDocumentId`,
+// `documentId`) accept a string OR an integer; pagination parameters
+// (`limit`, `offset`) accept an integer OR a numeric string. The
+// normalization itself lives in `src/param-normalize.ts` and is shared
+// with the CLI so both call paths behave identically.
+//
+// Content parameters (`title`, `text`, `query`, `url`, `path`, `name`,
+// `changelog`, `findText`) deliberately stay strict `Type.String()` —
+// silently stringifying an object/array would corrupt document bodies
+// and would break the CP-3689 patch guardrail, which compares the
+// submitted text byte-for-byte against the stored body.
+
+/** ID-like parameter: string or integer (trimmed to a string). */
+function IdSchema(description: string) {
+  return Type.Union([Type.String(), Type.Integer()], { description });
+}
+
+/**
+ * Pagination `limit`: integer or numeric string. Values above the
+ * server maximum are clamped by the handler (never rejected).
+ *
+ * The string branch only accepts POSITIVE integers (leading zeros are
+ * tolerated, e.g. `"007"` → 7), so the schema and OpenClaw's runtime
+ * validator agree on what a valid `limit` is: `limit: 0` / `limit: "0"`
+ * is refused by the schema instead of being coerced into a string that
+ * only the handler would catch.
+ */
+function LimitSchema(description: string) {
+  return Type.Union(
+    [
+      Type.Integer({ minimum: 1 }),
+      Type.String({ pattern: "^\\s*0*[1-9]\\d*\\s*$" }),
+    ],
+    { description },
+  );
+}
+
+/**
+ * Pagination `offset`: integer or numeric string. `offset` has no upper
+ * bound in the Outline pagination middleware.
+ */
+function OffsetSchema(description: string) {
+  return Type.Union(
+    [Type.Integer({ minimum: 0 }), Type.String({ pattern: "^\\s*\\d+\\s*$" })],
+    { description },
+  );
+}
 
 interface OutlineWikiConfig {
   apiToken?: string;
@@ -108,19 +166,13 @@ export default defineToolPlugin({
         "List documents in outline. Response contains metadata only — `text` (markdown body) is stripped from every document to keep toolResult payload small (CP-2379 planner-token fix: see `outline_doc_get` for the body). **Default excludes archived documents** — each document's `archivedAt` is preserved (null when live) so callers can inspect; pass `includeArchived: true` to surface archived docs alongside live ones. Optional filters: `limit` (default 25), `offset`, `collectionId` (UUID), `query` (substring match on title), `includeArchived` (default false). Calls `documents.list`.",
       parameters: Type.Object({
         limit: Type.Optional(
-          Type.Integer({
-            minimum: 1,
-            description: "Max documents to return (default 25).",
-          }),
+          LimitSchema("Max documents to return (default 25). Numeric strings are accepted; values above 100 are clamped to the Outline API maximum."),
         ),
         offset: Type.Optional(
-          Type.Integer({
-            minimum: 0,
-            description: "Pagination offset (default 0).",
-          }),
+          OffsetSchema("Pagination offset (default 0). Numeric strings are accepted."),
         ),
         collectionId: Type.Optional(
-          Type.String({ description: "Outline collection UUID to scope the list." }),
+          IdSchema("Outline collection UUID to scope the list (string or integer; trimmed)."),
         ),
         query: Type.Optional(
           Type.String({ description: "Substring filter on document title." }),
@@ -143,7 +195,7 @@ export default defineToolPlugin({
       description:
         "Get a single document with metadata + the full markdown body (one round-trip via `documents.info` — `data.text` is the markdown). Required: `id` (UUID).",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID." }),
+        id: IdSchema("Outline document UUID (string or integer; trimmed)."),
       }),
       async execute(args, cfg) {
         return await docGet(args, cfg as OutlineWikiConfig);
@@ -158,9 +210,9 @@ export default defineToolPlugin({
         title: Type.String({ description: "Document title." }),
         text: Type.String({ description: "Markdown body (no leading `# <title>` line)." }),
         collectionId: Type.Optional(
-          Type.String({
-            description: "Target collection UUID. Falls back to plugin config `defaultCollectionId` when omitted.",
-          }),
+          IdSchema(
+            "Target collection UUID. Falls back to plugin config `defaultCollectionId` when omitted (string or integer; trimmed).",
+          ),
         ),
         publish: Type.Optional(
           Type.Boolean({
@@ -169,10 +221,9 @@ export default defineToolPlugin({
           }),
         ),
         parentDocumentId: Type.Optional(
-          Type.String({
-            description:
-              "0.4.0+: nest the new document under this parent document UUID.",
-          }),
+          IdSchema(
+            "0.4.0+: nest the new document under this parent document UUID (string or integer; trimmed).",
+          ),
         ),
       }),
       async execute(args, cfg) {
@@ -195,7 +246,7 @@ export default defineToolPlugin({
         "- IMPORTANT: the server rewrites some markdown. A code span nested inside bold (submitted `` **`code`** ``) is stored with the emphasis markers moved (`` `**code**` ``) — the write still returns `ok: true`, but the body comes back mangled and the original anchor then 404s, so the change can no longer be undone with another patch. Write bold and code spans SEPARATELY (`**bold** `code``) instead of nesting them.\n" +
         "- When `patchVerification.verified` is `false`, do NOT retry with the same anchor — it is stale. Re-read the document and repair it with `editMode: \"replace\"`.",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID." }),
+        id: IdSchema("Outline document UUID (string or integer; trimmed)."),
         title: Type.Optional(Type.String({ description: "New title." })),
         text: Type.Optional(
           Type.String({
@@ -241,7 +292,7 @@ export default defineToolPlugin({
       description:
         "Move a document to trash (default, recoverable for ~30 days) or hard-delete (`permanent: true`, requires the doc to already be in trash). Required: `id` (UUID). Optional: `permanent` (bool, default false).",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID." }),
+        id: IdSchema("Outline document UUID (string or integer; trimmed)."),
         permanent: Type.Optional(
           Type.Boolean({
             description:
@@ -260,7 +311,7 @@ export default defineToolPlugin({
       description:
         "Archive a document (admin can still read it; recoverable via outline_doc_restore). Required: `id` (UUID).",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID." }),
+        id: IdSchema("Outline document UUID (string or integer; trimmed)."),
       }),
       async execute(args, cfg) {
         return await docArchive(args, cfg as OutlineWikiConfig);
@@ -272,7 +323,7 @@ export default defineToolPlugin({
       description:
         "Restore a document from the archive. Required: `id` (UUID).",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID." }),
+        id: IdSchema("Outline document UUID (string or integer; trimmed)."),
       }),
       async execute(args, cfg) {
         return await docRestore(args, cfg as OutlineWikiConfig);
@@ -284,16 +335,14 @@ export default defineToolPlugin({
       description:
         "Move a document to a different collection (and optionally reparent in the same call). Required: `id` (UUID) + `collectionId` (UUID, no default fallback — moving is an explicit gesture). Optional: `parentDocumentId` (UUID) to nest under a parent doc in the target collection.",
       parameters: Type.Object({
-        id: Type.String({ description: "Outline document UUID to move." }),
-        collectionId: Type.String({
-          description:
-            "Target collection UUID. No fallback — moving is explicit.",
-        }),
+        id: IdSchema("Outline document UUID to move (string or integer; trimmed)."),
+        collectionId: IdSchema(
+          "Target collection UUID. No fallback — moving is explicit (string or integer; trimmed).",
+        ),
         parentDocumentId: Type.Optional(
-          Type.String({
-            description:
-              "0.4.0+: nest the document under this parent document UUID in the target collection.",
-          }),
+          IdSchema(
+            "0.4.0+: nest the document under this parent document UUID in the target collection (string or integer; trimmed).",
+          ),
         ),
       }),
       async execute(args, cfg) {
@@ -308,13 +357,13 @@ export default defineToolPlugin({
       parameters: Type.Object({
         query: Type.String({ description: "Full-text search query (required, non-empty)." }),
         limit: Type.Optional(
-          Type.Integer({ minimum: 1, description: "Max results (default 25)." }),
+          LimitSchema("Max results (default 25). Numeric strings are accepted; values above 100 are clamped to the Outline API maximum."),
         ),
         offset: Type.Optional(
-          Type.Integer({ minimum: 0, description: "Pagination offset." }),
+          OffsetSchema("Pagination offset. Numeric strings are accepted."),
         ),
         collectionId: Type.Optional(
-          Type.String({ description: "Restrict search to one collection UUID." }),
+          IdSchema("Restrict search to one collection UUID (string or integer; trimmed)."),
         ),
         includeArchived: Type.Optional(
           Type.Boolean({
@@ -334,8 +383,12 @@ export default defineToolPlugin({
       description:
         "List all collections. Optional: `limit` (default 25), `offset`.",
       parameters: Type.Object({
-        limit: Type.Optional(Type.Integer({ minimum: 1 })),
-        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(
+          LimitSchema("Max collections to return (default 25). Numeric strings are accepted; values above 100 are clamped to the Outline API maximum."),
+        ),
+        offset: Type.Optional(
+          OffsetSchema("Pagination offset (default 0). Numeric strings are accepted."),
+        ),
       }),
       async execute(args, cfg) {
         return await collectionList(args, cfg as OutlineWikiConfig);
@@ -347,11 +400,13 @@ export default defineToolPlugin({
       description:
         "List documents in a collection (returns the cached navigation tree: `{id, url, title, children}` per node). **Archived children are excluded by default** — the underlying endpoint returns a navigation tree where `Document.toNavigationNode` defaults to `includeArchived: false`, so the response never surfaces archived docs. `includeArchived` is accepted for API symmetry with `outline_search_query` / `outline_doc_list` but currently has no effect (endpoint capability — the response shape does not carry `archivedAt` to filter on). Required: `id` (collection UUID, e.g. WTO = 2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba). Optional: `limit` (default 25), `offset`, `includeArchived` (default false; informational, see above).",
       parameters: Type.Object({
-        id: Type.String({
-          description: "Collection UUID.",
-        }),
-        limit: Type.Optional(Type.Integer({ minimum: 1 })),
-        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        id: IdSchema("Collection UUID (string or integer; trimmed)."),
+        limit: Type.Optional(
+          LimitSchema("Max documents to return (default 25). Numeric strings are accepted; values above 100 are clamped to the Outline API maximum."),
+        ),
+        offset: Type.Optional(
+          OffsetSchema("Pagination offset (default 0). Numeric strings are accepted."),
+        ),
         includeArchived: Type.Optional(
           Type.Boolean({
             description:
@@ -408,7 +463,7 @@ export default defineToolPlugin({
       description:
         "Update an existing outline collection. Required: `id` (collection UUID). Optional: `name`, `description`, `icon`, `color`, `permission`, `sharing` — pass only the fields you want to change. Calls `collections.update`.",
       parameters: Type.Object({
-        id: Type.String({ description: "Collection UUID (required)." }),
+        id: IdSchema("Collection UUID (string or integer; trimmed; required)."),
         name: Type.Optional(
           Type.String({ description: "New collection name." }),
         ),
@@ -445,14 +500,9 @@ export default defineToolPlugin({
       description:
         "Get revision changelog for a document (metadata only: name, timestamp, author). Returns up to N recent revisions, stripped of body text/data/collaborators — safe to call frequently to surface change history. Calls `revisions.list`. Required: `documentId` (UUID). Optional: `limit` (number, default 5, max 20).",
       parameters: Type.Object({
-        documentId: Type.String({ description: "Outline document UUID." }),
+        documentId: IdSchema("Outline document UUID (string or integer; trimmed)."),
         limit: Type.Optional(
-          Type.Integer({
-            minimum: 1,
-            maximum: 20,
-            description: "Max revisions to return (default 5, max 20).",
-            default: 5,
-          }),
+          LimitSchema("Max revisions to return (default 5, max 20). Numeric strings are accepted; values above 20 are clamped to 20."),
         ),
       }),
       async execute(args, cfg) {
@@ -490,9 +540,9 @@ export default defineToolPlugin({
           }),
         ),
         documentId: Type.Optional(
-          Type.String({
-            description: "Outline document UUID to attach to (required for url mode).",
-          }),
+          IdSchema(
+            "Outline document UUID to attach to (string or integer; trimmed; required for url mode).",
+          ),
         ),
         preset: Type.Optional(
           Type.String({
@@ -524,11 +574,29 @@ async function docList(
   // filter and so the response shape is consistent across outline versions.
   const includeArchived = pickBoolean(args.includeArchived, false);
 
+  // CP-3752: pagination accepts a number or a numeric string; values
+  // above the Outline API maximum are clamped (never rejected).
+  const limit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 25,
+    max: OUTLINE_MAX_LIMIT,
+  });
+  if (!limit.ok) return textResult({ error: limit.error });
+  const offset = normalizeOffset(args.offset, {
+    label: "offset",
+    fallback: 0,
+  });
+  if (!offset.ok) return textResult({ error: offset.error });
+
   const body: Record<string, unknown> = {
-    limit: pickNumber(args.limit, 25),
-    offset: pickNumber(args.offset, 0),
+    limit: limit.value,
+    offset: offset.value,
   };
-  if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+  // CP-3752: `collectionId` is an ID-like parameter — string or integer,
+  // trimmed. Invalid types are rejected instead of being stringified.
+  const collectionId = normalizeOptionalId(args.collectionId, "collectionId");
+  if (!collectionId.ok) return textResult({ error: collectionId.error });
+  if (collectionId.value !== undefined) body.collectionId = collectionId.value;
   if (typeof args.query === "string") body.query = args.query;
   // When the caller opts in to archived docs, ask the server for them too
   // (otherwise the server may honor its default-exclude behavior and return
@@ -575,9 +643,11 @@ async function docGet(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_get requires a non-empty `id` (string) argument.",
+      error: `outline_doc_get requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
 
@@ -587,11 +657,11 @@ async function docGet(
   // If a future outline revision returns `text=null` for some documents,
   // fall back to documents.export; until then no extra round trip needed.
   try {
-    const info = await outlineFetch(cfg, "documents.info", { id: args.id });
+    const info = await outlineFetch(cfg, "documents.info", { id: id.value });
     return textResult({
       ok: true,
       method: "documents.get",
-      request: { id: args.id },
+      request: { id: id.value },
       document: info?.data ?? null,
     });
   } catch (err) {
@@ -618,16 +688,29 @@ async function docCreate(
   // collectionId resolution order: explicit args.collectionId > cfg.defaultCollectionId.
   // This makes recurring workflows (e.g. always writing under the WTO
   // collection) ergonomic while still allowing per-call overrides.
-  const collectionId =
-    (typeof args.collectionId === "string" && args.collectionId.length > 0
-      ? args.collectionId
-      : undefined) ??
-    cfg.defaultCollectionId;
+  //
+  // CP-3752: `collectionId` accepts a string or an integer and is trimmed.
+  const argCollectionId = normalizeOptionalId(args.collectionId, "collectionId");
+  if (!argCollectionId.ok) {
+    return textResult({
+      error: `outline_doc_create requires \`collectionId\` (string or integer). ${argCollectionId.error}`,
+    });
+  }
+  const collectionId = argCollectionId.value ?? cfg.defaultCollectionId;
   if (!collectionId) {
     return textResult({
       error:
         "outline_doc_create requires `collectionId` (string) — pass it as an arg, or set `defaultCollectionId` in the plugin config.",
     });
+  }
+
+  // CP-3752: `parentDocumentId` accepts a string or an integer and is trimmed.
+  const parentDocumentId = normalizeOptionalId(
+    args.parentDocumentId,
+    "parentDocumentId",
+  );
+  if (!parentDocumentId.ok) {
+    return textResult({ error: parentDocumentId.error });
   }
 
   // MVP wires the truly required fields + `publish` (default true so the
@@ -643,8 +726,8 @@ async function docCreate(
     collectionId,
     publish: typeof args.publish === "boolean" ? args.publish : true,
   };
-  if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
-    body.parentDocumentId = args.parentDocumentId;
+  if (parentDocumentId.value !== undefined) {
+    body.parentDocumentId = parentDocumentId.value;
   }
 
   try {
@@ -718,9 +801,11 @@ async function docUpdate(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_update requires a non-empty `id` (string) argument.",
+      error: `outline_doc_update requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
   // 0.4.0 inherits the 0.3.1 fail-fast: outline's `documents.update` endpoint
@@ -770,7 +855,7 @@ async function docUpdate(
   // the title will accumulate on every round-trip — so callers should strip
   // the leading `# <title>` line first. We surface this in the error hint
   // when a request that looks like an export-blob comes in unchanged.
-  const body: Record<string, unknown> = { id: args.id };
+  const body: Record<string, unknown> = { id: id.value };
   if (typeof args.text === "string") {
     body.text = args.text;
     body.editMode = typeof args.editMode === "string" ? args.editMode : "replace";
@@ -827,9 +912,9 @@ async function docUpdate(
       });
     }
     const preflight = await runPatchPreflight(
-      args.id,
+      id.value,
       findText,
-      (id) => fetchDocText(cfg, id),
+      (docId) => fetchDocText(cfg, docId),
     );
     if (!preflight.ok) {
       return textResult({ error: preflight.error });
@@ -857,10 +942,10 @@ async function docUpdate(
     let patchVerification: PatchVerificationResult | undefined;
     if (isPatch && patchBeforeBody !== null && typeof body.text === "string") {
       patchVerification = await runPatchVerification(
-        args.id,
+        id.value,
         patchBeforeBody,
         body.text,
-        (id) => fetchDocText(cfg, id),
+        (docId) => fetchDocText(cfg, docId),
       );
       if (!patchVerification.verified) {
         warnings.push(
@@ -875,7 +960,7 @@ async function docUpdate(
     // field. Failures here are non-fatal — the main update has already
     // succeeded, so we log into `warnings` and continue.
     if (typeof args.changelog === "string" && args.changelog.length > 0) {
-      const changelogResult = await writeChangelog(args.id, args.changelog, cfg);
+      const changelogResult = await writeChangelog(id.value, args.changelog, cfg);
       if ("warning" in changelogResult) {
         if (args.strictChangelog === true) {
           return textResult({
@@ -931,9 +1016,11 @@ async function docDelete(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_delete requires a non-empty `id` (string) argument.",
+      error: `outline_doc_delete requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
 
@@ -956,7 +1043,7 @@ async function docDelete(
   // a caller wants the legacy archive-on-delete behavior, they should call
   // `outline_doc_archive` first and then `outline_doc_delete`.
   const permanent = typeof args.permanent === "boolean" ? args.permanent : false;
-  const body: Record<string, unknown> = { id: args.id };
+  const body: Record<string, unknown> = { id: id.value };
   if (permanent) body.permanent = true;
 
   try {
@@ -964,10 +1051,10 @@ async function docDelete(
     return textResult({
       ok: true,
       method: "documents.delete",
-      request: { id: args.id, permanent },
+      request: { id: id.value, permanent },
       result: data?.data ?? null,
       summary: {
-        id: args.id,
+        id: id.value,
         mode: permanent ? "permanent" : "trash",
       },
     });
@@ -982,21 +1069,23 @@ async function docArchive(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_archive requires a non-empty `id` (string) argument.",
+      error: `outline_doc_archive requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
   try {
-    const data = await outlineFetch(cfg, "documents.archive", { id: args.id });
+    const data = await outlineFetch(cfg, "documents.archive", { id: id.value });
     const archived = data?.data ?? null;
     return textResult({
       ok: true,
       method: "documents.archive",
-      request: { id: args.id },
+      request: { id: id.value },
       document: archived,
       summary: {
-        id: args.id,
+        id: id.value,
         archivedAt: archived?.archivedAt ?? null,
       },
     });
@@ -1011,19 +1100,21 @@ async function docRestore(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_restore requires a non-empty `id` (string) argument.",
+      error: `outline_doc_restore requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
   try {
-    const data = await outlineFetch(cfg, "documents.restore", { id: args.id });
+    const data = await outlineFetch(cfg, "documents.restore", { id: id.value });
     return textResult({
       ok: true,
       method: "documents.restore",
-      request: { id: args.id },
+      request: { id: id.value },
       document: data?.data ?? null,
-      summary: { id: args.id, restored: true },
+      summary: { id: id.value, restored: true },
     });
   } catch (err) {
     return textResult({ error: `documents.restore failed: ${errorMessage(err)}` });
@@ -1036,29 +1127,43 @@ async function docMove(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
-      error: "outline_doc_move requires a non-empty `id` (string) argument.",
+      error: `outline_doc_move requires a non-empty \`id\` (string or integer) argument. ${id.error}`,
     });
   }
   // doc.move has no `defaultCollectionId` fallback — moving is an
   // explicit user gesture, the destination must be named in the call.
-  if (typeof args.collectionId !== "string" || args.collectionId.length === 0) {
+  //
+  // CP-3752: `collectionId` accepts a string or an integer and is trimmed.
+  const collectionId = normalizeId(args.collectionId, "collectionId");
+  if (!collectionId.ok) {
     return textResult({
       error:
-        "outline_doc_move requires `collectionId` (string, UUID) — moving is an explicit gesture, no implicit default.",
+        "outline_doc_move requires `collectionId` (string, UUID) — moving is an explicit gesture, no implicit default. " +
+        collectionId.error,
     });
+  }
+  // CP-3752: `parentDocumentId` accepts a string or an integer and is trimmed.
+  const parentDocumentId = normalizeOptionalId(
+    args.parentDocumentId,
+    "parentDocumentId",
+  );
+  if (!parentDocumentId.ok) {
+    return textResult({ error: parentDocumentId.error });
   }
   // 0.4.0+: `parentDocumentId` is optional on outline_doc_move so a caller can
   // reparent a doc in the same operation (e.g. "move under the
   // <quality & testing> container"). Omitted → outline server defaults
   // the new doc to the collection root (existing behavior preserved).
   const body: Record<string, unknown> = {
-    id: args.id,
-    collectionId: args.collectionId,
+    id: id.value,
+    collectionId: collectionId.value,
   };
-  if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
-    body.parentDocumentId = args.parentDocumentId;
+  if (parentDocumentId.value !== undefined) {
+    body.parentDocumentId = parentDocumentId.value;
   }
   try {
     const data = await outlineFetch(cfg, "documents.move", body);
@@ -1068,8 +1173,8 @@ async function docMove(
       request: body,
       document: data?.data ?? null,
       summary: {
-        id: args.id,
-        collectionId: args.collectionId,
+        id: id.value,
+        collectionId: collectionId.value,
         parentDocumentId: body.parentDocumentId ?? null,
       },
     });
@@ -1095,12 +1200,30 @@ async function searchQuery(
   // hits in the result.
   const includeArchived = pickBoolean(args.includeArchived, false);
 
+  // CP-3752: pagination accepts a number or a numeric string; values
+  // above the Outline API maximum are clamped (never rejected).
+  const limit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 25,
+    max: OUTLINE_MAX_LIMIT,
+  });
+  if (!limit.ok) return textResult({ error: limit.error });
+  const offset = normalizeOffset(args.offset, {
+    label: "offset",
+    fallback: 0,
+  });
+  if (!offset.ok) return textResult({ error: offset.error });
+
   const body: Record<string, unknown> = {
     query: args.query,
-    limit: pickNumber(args.limit, 25),
-    offset: pickNumber(args.offset, 0),
+    limit: limit.value,
+    offset: offset.value,
   };
-  if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+  // CP-3752: `collectionId` is an ID-like parameter — string or integer,
+  // trimmed. Invalid types are rejected instead of being stringified.
+  const collectionId = normalizeOptionalId(args.collectionId, "collectionId");
+  if (!collectionId.ok) return textResult({ error: collectionId.error });
+  if (collectionId.value !== undefined) body.collectionId = collectionId.value;
   // When the caller opts in, ask the server for archived hits too via the
   // statusFilter shorthand so the server doesn't drop them at the query
   // level. (Outline's `documents.search` honors `statusFilter` in addition
@@ -1187,10 +1310,13 @@ async function attachmentUpload(
           "outline_attachment_upload with `url` only supports preset=documentAttachment; use `path` for avatar/emoji.",
       });
     }
-    if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+    // CP-3752: `documentId` accepts a string or an integer and is trimmed.
+    const documentId = normalizeId(args.documentId, "documentId");
+    if (!documentId.ok) {
       return textResult({
         error:
-          "outline_attachment_upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document.",
+          "outline_attachment_upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document. " +
+          documentId.error,
       });
     }
     let attachmentData: any;
@@ -1198,7 +1324,7 @@ async function attachmentUpload(
       const data = await outlineFetch(cfg, "attachments.createFromUrl", {
         name: args.name,
         url: args.url,
-        documentId: args.documentId,
+        documentId: documentId.value,
         preset,
       });
       attachmentData = data?.data ?? null;
@@ -1219,7 +1345,7 @@ async function attachmentUpload(
       return textResult({
         error: "源 URL 不可达或抓取失败,附件为空",
         method: "attachments.createFromUrl",
-        request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+        request: { name: args.name, url: args.url, documentId: documentId.value, preset },
         attachment: attachmentData,
       });
     }
@@ -1228,7 +1354,7 @@ async function attachmentUpload(
     return textResult({
       ok: true,
       method: "attachments.createFromUrl",
-      request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+      request: { name: args.name, url: args.url, documentId: documentId.value, preset },
       attachment,
       summary: attachment
         ? {
@@ -1251,10 +1377,15 @@ async function attachmentUpload(
     typeof args.contentType === "string" && args.contentType.length > 0
       ? args.contentType
       : "application/octet-stream";
-  const documentId =
-    typeof args.documentId === "string" && args.documentId.length > 0
-      ? args.documentId
-      : undefined;
+  // CP-3752: `documentId` accepts a string or an integer and is trimmed.
+  const optionalDocumentId = normalizeOptionalId(
+    args.documentId,
+    "documentId",
+  );
+  if (!optionalDocumentId.ok) {
+    return textResult({ error: optionalDocumentId.error });
+  }
+  const documentId = optionalDocumentId.value;
 
   let buffer: Buffer;
   try {
@@ -1382,9 +1513,23 @@ async function collectionList(
   const guard = requireConfig(cfg);
   if (guard) return guard;
 
+  // CP-3752: pagination accepts a number or a numeric string; values
+  // above the Outline API maximum are clamped (never rejected).
+  const limit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 25,
+    max: OUTLINE_MAX_LIMIT,
+  });
+  if (!limit.ok) return textResult({ error: limit.error });
+  const offset = normalizeOffset(args.offset, {
+    label: "offset",
+    fallback: 0,
+  });
+  if (!offset.ok) return textResult({ error: offset.error });
+
   const body: Record<string, unknown> = {
-    limit: pickNumber(args.limit, 25),
-    offset: pickNumber(args.offset, 0),
+    limit: limit.value,
+    offset: offset.value,
   };
 
   try {
@@ -1407,10 +1552,13 @@ async function collectionDocuments(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
       error:
-        "outline_collection_documents requires a non-empty `id` (string) argument (collection id, e.g. WTO = 2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba).",
+        "outline_collection_documents requires a non-empty `id` (string or integer) argument (collection id, e.g. WTO = 2539c4a2-1fa8-4f0e-900f-9a5c7f1f72ba). " +
+        id.error,
     });
   }
 
@@ -1423,10 +1571,24 @@ async function collectionDocuments(
   // effect (documented in the tool description).
   const includeArchived = pickBoolean(args.includeArchived, false);
 
+  // CP-3752: pagination accepts a number or a numeric string; values
+  // above the Outline API maximum are clamped (never rejected).
+  const limit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 25,
+    max: OUTLINE_MAX_LIMIT,
+  });
+  if (!limit.ok) return textResult({ error: limit.error });
+  const offset = normalizeOffset(args.offset, {
+    label: "offset",
+    fallback: 0,
+  });
+  if (!offset.ok) return textResult({ error: offset.error });
+
   const body: Record<string, unknown> = {
-    id: args.id,
-    limit: pickNumber(args.limit, 25),
-    offset: pickNumber(args.offset, 0),
+    id: id.value,
+    limit: limit.value,
+    offset: offset.value,
   };
 
   try {
@@ -1511,10 +1673,13 @@ async function collectionUpdate(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.id !== "string" || args.id.length === 0) {
+  // CP-3752: `id` accepts a string or an integer and is trimmed.
+  const id = normalizeId(args.id, "id");
+  if (!id.ok) {
     return textResult({
       error:
-        "outline_collection_update requires a non-empty `id` (string) argument (collection UUID).",
+        "outline_collection_update requires a non-empty `id` (string or integer) argument (collection UUID). " +
+        id.error,
     });
   }
 
@@ -1538,7 +1703,7 @@ async function collectionUpdate(
     });
   }
 
-  const body: Record<string, unknown> = { id: args.id };
+  const body: Record<string, unknown> = { id: id.value };
   for (const k of mutable) {
     const v = (args as Record<string, unknown>)[k];
     if (typeof v !== "undefined") body[k] = v;
@@ -1573,20 +1738,31 @@ async function revLog(
 ) {
   const guard = requireConfig(cfg);
   if (guard) return guard;
-  if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+  // CP-3752: `documentId` accepts a string or an integer and is trimmed.
+  const documentId = normalizeId(args.documentId, "documentId");
+  if (!documentId.ok) {
     return textResult({
       error:
-        "outline_rev_log requires a non-empty `documentId` (string) argument.",
+        "outline_rev_log requires a non-empty `documentId` (string or integer) argument. " +
+        documentId.error,
     });
   }
   // Clamp limit into [1, 20] with a default of 5. The TypeBox schema already
   // declares maximum: 20, so OpenClaw should refuse larger values before we
   // get here — but clamp defensively in case the schema is loosened later.
-  const rawLimit = pickNumber(args.limit, 5);
-  const limit = Math.min(20, Math.max(1, Math.trunc(rawLimit)));
+  //
+  // CP-3752: `limit` also accepts a numeric string; values above 20 are
+  // clamped to 20 (never rejected).
+  const normalizedLimit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 5,
+    max: REV_LOG_MAX_LIMIT,
+  });
+  if (!normalizedLimit.ok) return textResult({ error: normalizedLimit.error });
+  const limit = normalizedLimit.value;
 
   const body: Record<string, unknown> = {
-    documentId: args.documentId,
+    documentId: documentId.value,
     limit,
   };
 
@@ -1733,10 +1909,6 @@ function requireConfig(cfg: OutlineWikiConfig) {
     });
   }
   return null;
-}
-
-function pickNumber(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
 function pickBoolean(v: unknown, fallback: boolean): boolean {

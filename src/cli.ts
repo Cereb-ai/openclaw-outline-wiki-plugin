@@ -47,6 +47,14 @@ import {
   runPatchPreflight,
   runPatchVerification,
 } from "./patch-guard.js";
+import {
+  normalizeId,
+  normalizeLimit,
+  normalizeOffset,
+  normalizeOptionalId,
+  OUTLINE_MAX_LIMIT,
+  REV_LOG_MAX_LIMIT,
+} from "./param-normalize.js";
 
 // 100% parity with the OpenClaw native MCP tool names (outline_*).
 const MCP_ALIASES: Record<string, string> = {
@@ -199,18 +207,35 @@ async function dispatchDoc(
 ) {
   switch (method) {
     case "list": {
-      // Mirror index.ts docList: pickNumber → finite-number or 25 default.
+      // Mirror index.ts docList: CP-3752 pagination normalization
+      // (number | numeric string; values above the Outline API maximum
+      // are clamped, never rejected).
       // CP-2559: includeArchived defaults to false — Outline's
       // `documents.list` already defaults to excluding archived docs
       // server-side, but we re-enforce client-side for parity with the
       // MCP tool + consistency across outline versions.
       const includeArchived =
         typeof args.includeArchived === "boolean" ? args.includeArchived : false;
+      const limit = normalizeLimit(args.limit, {
+        label: "limit",
+        fallback: 25,
+        max: OUTLINE_MAX_LIMIT,
+      });
+      if (!limit.ok) return textResult({ error: limit.error });
+      const offset = normalizeOffset(args.offset, {
+        label: "offset",
+        fallback: 0,
+      });
+      if (!offset.ok) return textResult({ error: offset.error });
       const body: Record<string, unknown> = {
-        limit: pickNumber(args.limit, 25),
-        offset: pickNumber(args.offset, 0),
+        limit: limit.value,
+        offset: offset.value,
       };
-      if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+      // CP-3752: `collectionId` is an ID-like parameter — string or integer,
+      // trimmed. Invalid types are rejected instead of being stringified.
+      const collectionId = normalizeOptionalId(args.collectionId, "collectionId");
+      if (!collectionId.ok) return textResult({ error: collectionId.error });
+      if (collectionId.value !== undefined) body.collectionId = collectionId.value;
       if (typeof args.query === "string") body.query = args.query;
       if (includeArchived) {
         body.statusFilter = ["archived", "published", "draft"];
@@ -241,8 +266,10 @@ async function dispatchDoc(
       });
     }
     case "get": {
-      if (typeof args.id !== "string") return textResult({ error: "doc.get requires a non-empty `id` (string)" });
-      const data = await outlineFetch(cfg, "documents.info", { id: args.id });
+      // CP-3752: `id` accepts a string or an integer and is trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.get requires a non-empty \`id\` (string or integer). ${id.error}` });
+      const data = await outlineFetch(cfg, "documents.info", { id: id.value });
       return textResult({ ok: true, method: "documents.info", ...data?.data ?? {} });
     }
     case "create": {
@@ -255,20 +282,30 @@ async function dispatchDoc(
       // collectionId resolution order: explicit args.collectionId > cfg.defaultCollectionId.
       // Mirrors index.ts docCreate — both args AND config can supply it, both missing = hard error
       // (no silent drop, no implicit first-collection fallback).
-      const collectionId =
-        (typeof args.collectionId === "string" && args.collectionId.length > 0
-          ? args.collectionId
-          : undefined) ??
-        cfg.defaultCollectionId;
+      //
+      // CP-3752: `collectionId` accepts a string or an integer and is trimmed.
+      const argCollectionId = normalizeOptionalId(args.collectionId, "collectionId");
+      if (!argCollectionId.ok) {
+        return textResult({ error: `doc.create requires \`collectionId\` (string or integer). ${argCollectionId.error}` });
+      }
+      const collectionId = argCollectionId.value ?? cfg.defaultCollectionId;
       if (!collectionId) {
         return textResult({
           error:
             "doc.create requires `collectionId` (string) — pass it as an arg, or set `defaultCollectionId` in the plugin config.",
         });
       }
-      const body = { title: args.title, text: args.text, collectionId, publish: args.publish ?? true };
-      if (typeof args.parentDocumentId === "string" && args.parentDocumentId.length > 0) {
-        body.parentDocumentId = args.parentDocumentId;
+      // CP-3752: `parentDocumentId` accepts a string or an integer and is trimmed.
+      const parentDocumentId = normalizeOptionalId(
+        args.parentDocumentId,
+        "parentDocumentId",
+      );
+      if (!parentDocumentId.ok) {
+        return textResult({ error: parentDocumentId.error });
+      }
+      const body: Record<string, unknown> = { title: args.title, text: args.text, collectionId, publish: args.publish ?? true };
+      if (parentDocumentId.value !== undefined) {
+        body.parentDocumentId = parentDocumentId.value;
       }
       let data;
       try {
@@ -316,9 +353,9 @@ async function dispatchDoc(
       });
     }
     case "update": {
-      if (typeof args.id !== "string" || args.id.length === 0) {
-        return textResult({ error: "doc.update requires a non-empty `id` (string)" });
-      }
+      // CP-3752: `id` accepts a string or an integer and is trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.update requires a non-empty \`id\` (string or integer). ${id.error}` });
       // Mirrors index.ts docUpdate fail-fast: outline's documents.update schema does NOT
       // include parentDocumentId — server silently drops it. Callers must use doc.move.
       if (args.parentDocumentId !== undefined) {
@@ -333,7 +370,7 @@ async function dispatchDoc(
           error: "doc.update requires at least one of `text` or `title` (string) to change.",
         });
       }
-      const body = { id: args.id };
+      const body = { id: id.value };
       if (typeof args.text === "string") {
         body.text = args.text;
         body.editMode = typeof args.editMode === "string" ? args.editMode : "replace";
@@ -376,8 +413,8 @@ async function dispatchDoc(
               "outline_doc_update patch preflight failed: 400 validation_error: findText is required when using patch editMode — no update was sent.",
           });
         }
-        const preflight = await runPatchPreflight(args.id, findText, (id) =>
-          fetchDocText(cfg, id),
+        const preflight = await runPatchPreflight(id.value, findText, (docId) =>
+          fetchDocText(cfg, docId),
         );
         if (!preflight.ok) {
           return textResult({ error: preflight.error });
@@ -398,10 +435,10 @@ async function dispatchDoc(
       let patchVerification;
       if (isPatch && patchBeforeBody !== null && typeof body.text === "string") {
         patchVerification = await runPatchVerification(
-          args.id,
+          id.value,
           patchBeforeBody,
           body.text,
-          (id) => fetchDocText(cfg, id),
+          (docId) => fetchDocText(cfg, docId),
         );
         if (!patchVerification.verified) {
           warnings.push(
@@ -413,7 +450,7 @@ async function dispatchDoc(
 
       // Best-effort changelog write (mirrors index.ts writeChangelog).
       if (typeof args.changelog === "string" && args.changelog.length > 0) {
-        const cl = await writeChangelog(args.id, args.changelog, cfg);
+        const cl = await writeChangelog(id.value, args.changelog, cfg);
         if ("warning" in cl) {
           if (args.strictChangelog === true) {
             return textResult({
@@ -455,34 +492,53 @@ async function dispatchDoc(
       });
     }
     case "delete": {
-      if (typeof args.id !== "string") return textResult({ error: "doc.delete requires a non-empty `id` (string)" });
-      const data = await outlineFetch(cfg, "documents.delete", { id: args.id, permanent: args.permanent === true });
+      // CP-3752: `id` accepts a string or an integer and is trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.delete requires a non-empty \`id\` (string or integer). ${id.error}` });
+      const data = await outlineFetch(cfg, "documents.delete", { id: id.value, permanent: args.permanent === true });
       return textResult({ ok: true, method: "documents.delete", ...data?.data ?? {} });
     }
     case "archive": {
-      if (typeof args.id !== "string") return textResult({ error: "doc.archive requires a non-empty `id` (string)" });
-      const data = await outlineFetch(cfg, "documents.archive", { id: args.id });
+      // CP-3752: `id` accepts a string or an integer and is trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.archive requires a non-empty \`id\` (string or integer). ${id.error}` });
+      const data = await outlineFetch(cfg, "documents.archive", { id: id.value });
       return textResult({ ok: true, method: "documents.archive", ...data?.data ?? {} });
     }
     case "restore": {
-      if (typeof args.id !== "string") return textResult({ error: "doc.restore requires a non-empty `id` (string)" });
-      const data = await outlineFetch(cfg, "documents.restore", { id: args.id });
+      // CP-3752: `id` accepts a string or an integer and is trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.restore requires a non-empty \`id\` (string or integer). ${id.error}` });
+      const data = await outlineFetch(cfg, "documents.restore", { id: id.value });
       return textResult({ ok: true, method: "documents.restore", ...data?.data ?? {} });
     }
     case "move": {
-      if (typeof args.id !== "string") return textResult({ error: "doc.move requires a non-empty `id` (string)" });
-      const body = { id: args.id, collectionId: args.collectionId };
-      if (typeof args.parentDocumentId === "string") body.parentDocumentId = args.parentDocumentId;
+      // CP-3752: `id` / `collectionId` / `parentDocumentId` accept a string
+      // or an integer and are trimmed.
+      const id = normalizeId(args.id, "id");
+      if (!id.ok) return textResult({ error: `doc.move requires a non-empty \`id\` (string or integer). ${id.error}` });
+      const collectionId = normalizeId(args.collectionId, "collectionId");
+      if (!collectionId.ok) return textResult({ error: `doc.move requires \`collectionId\` (string or integer). ${collectionId.error}` });
+      const parentDocumentId = normalizeOptionalId(args.parentDocumentId, "parentDocumentId");
+      if (!parentDocumentId.ok) return textResult({ error: parentDocumentId.error });
+      const body: Record<string, unknown> = { id: id.value, collectionId: collectionId.value };
+      if (parentDocumentId.value !== undefined) body.parentDocumentId = parentDocumentId.value;
       const data = await outlineFetch(cfg, "documents.move", body);
       return textResult({ ok: true, method: "documents.move", ...data?.data ?? {} });
     }
     case "rev_log": {
-      if (typeof args.documentId !== "string" || args.documentId.length === 0) {
-        return textResult({ error: "doc.rev_log requires a non-empty `documentId` (string) argument." });
-      }
-      const rawLimit = typeof args.limit === "number" ? args.limit : 5;
-      const limit = Math.min(20, Math.max(1, Math.trunc(rawLimit)));
-      const data = await outlineFetch(cfg, "revisions.list", { documentId: args.documentId, limit });
+      // CP-3752: `documentId` accepts a string or an integer and is trimmed;
+      // `limit` accepts a number or a numeric string and is clamped to 20.
+      const documentId = normalizeId(args.documentId, "documentId");
+      if (!documentId.ok) return textResult({ error: `doc.rev_log requires a non-empty \`documentId\` (string or integer) argument. ${documentId.error}` });
+      const normalizedLimit = normalizeLimit(args.limit, {
+        label: "limit",
+        fallback: 5,
+        max: REV_LOG_MAX_LIMIT,
+      });
+      if (!normalizedLimit.ok) return textResult({ error: normalizedLimit.error });
+      const limit = normalizedLimit.value;
+      const data = await outlineFetch(cfg, "revisions.list", { documentId: documentId.value, limit });
       return textResult({ ok: true, method: "revisions.list", revisions: data?.data ?? [], pagination: data?.pagination ?? null });
     }
     default:
@@ -496,7 +552,20 @@ async function dispatchCollection(
   cfg: { apiToken: string; endpoint: string },
 ) {
   if (method === "list") {
-    const body = { limit: args.limit ?? 25, offset: args.offset ?? 0 };
+    // CP-3752: pagination accepts a number or a numeric string; values
+    // above the Outline API maximum are clamped (never rejected).
+    const limit = normalizeLimit(args.limit, {
+      label: "limit",
+      fallback: 25,
+      max: OUTLINE_MAX_LIMIT,
+    });
+    if (!limit.ok) return textResult({ error: limit.error });
+    const offset = normalizeOffset(args.offset, {
+      label: "offset",
+      fallback: 0,
+    });
+    if (!offset.ok) return textResult({ error: offset.error });
+    const body = { limit: limit.value, offset: offset.value };
     const data = await outlineFetch(cfg, "collections.list", body);
     return textResult({ ok: true, method: "collections.list", collections: data?.data ?? [], pagination: data?.pagination ?? null });
   }
@@ -510,7 +579,22 @@ async function dispatchCollection(
     // effect (documented in the MCP tool description).
     const includeArchived =
       typeof args.includeArchived === "boolean" ? args.includeArchived : false;
-    const body = { id: args.id, limit: args.limit ?? 25, offset: args.offset ?? 0 };
+    // CP-3752: `id` accepts a string or an integer and is trimmed;
+    // pagination accepts a number or a numeric string.
+    const id = normalizeId(args.id, "id");
+    if (!id.ok) return textResult({ error: `collection.documents requires a non-empty \`id\` (string or integer). ${id.error}` });
+    const limit = normalizeLimit(args.limit, {
+      label: "limit",
+      fallback: 25,
+      max: OUTLINE_MAX_LIMIT,
+    });
+    if (!limit.ok) return textResult({ error: limit.error });
+    const offset = normalizeOffset(args.offset, {
+      label: "offset",
+      fallback: 0,
+    });
+    if (!offset.ok) return textResult({ error: offset.error });
+    const body = { id: id.value, limit: limit.value, offset: offset.value };
     const data = await outlineFetch(cfg, "collections.documents", body);
     return textResult({
       ok: true,
@@ -545,15 +629,15 @@ async function dispatchCollection(
     return textResult({ ok: true, method: "collections.create", collection: data?.data ?? null });
   }
   if (method === "update") {
-    if (typeof args.id !== "string" || args.id.length === 0) {
-      return textResult({ error: "collection.update requires a non-empty `id` (string)" });
-    }
+    // CP-3752: `id` accepts a string or an integer and is trimmed.
+    const id = normalizeId(args.id, "id");
+    if (!id.ok) return textResult({ error: `collection.update requires a non-empty \`id\` (string or integer). ${id.error}` });
     const mutable = ["name", "description", "icon", "color", "permission", "sharing"];
     const hasAny = mutable.some((k) => typeof args[k] !== "undefined");
     if (!hasAny) {
       return textResult({ error: "collection.update requires at least one of " + mutable.join(", ") });
     }
-    const body: Record<string, unknown> = { id: args.id };
+    const body: Record<string, unknown> = { id: id.value };
     for (const k of mutable) {
       if (typeof args[k] !== "undefined") body[k] = args[k];
     }
@@ -575,13 +659,30 @@ async function dispatchSearch(
   // does NOT exclude archived docs by default, so we must filter client-side.
   const includeArchived =
     typeof args.includeArchived === "boolean" ? args.includeArchived : false;
-  // Mirror index.ts searchQuery: limit default = 25 (not 10), via pickNumber helper.
+  // Mirror index.ts searchQuery: CP-3752 pagination normalization
+  // (number | numeric string; values above the Outline API maximum are
+  // clamped, never rejected). Limit default = 25 (not 10).
+  const limit = normalizeLimit(args.limit, {
+    label: "limit",
+    fallback: 25,
+    max: OUTLINE_MAX_LIMIT,
+  });
+  if (!limit.ok) return textResult({ error: limit.error });
+  const offset = normalizeOffset(args.offset, {
+    label: "offset",
+    fallback: 0,
+  });
+  if (!offset.ok) return textResult({ error: offset.error });
   const body: Record<string, unknown> = {
     query: args.query,
-    limit: pickNumber(args.limit, 25),
-    offset: pickNumber(args.offset, 0),
+    limit: limit.value,
+    offset: offset.value,
   };
-  if (typeof args.collectionId === "string") body.collectionId = args.collectionId;
+  // CP-3752: `collectionId` is an ID-like parameter — string or integer,
+  // trimmed. Invalid types are rejected instead of being stringified.
+  const collectionId = normalizeOptionalId(args.collectionId, "collectionId");
+  if (!collectionId.ok) return textResult({ error: collectionId.error });
+  if (collectionId.value !== undefined) body.collectionId = collectionId.value;
   if (includeArchived) {
     body.statusFilter = ["archived", "published", "draft"];
   }
@@ -644,13 +745,16 @@ async function dispatchAttachment(
           "attachment.upload with `url` only supports preset=documentAttachment; use `path` for avatar/emoji.",
       });
     }
-    if (typeof args.documentId !== "string" || args.documentId.length === 0) {
+    // CP-3752: `documentId` accepts a string or an integer and is trimmed.
+    const documentId = normalizeId(args.documentId, "documentId");
+    if (!documentId.ok) {
       return textResult({
         error:
-          "attachment.upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document.",
+          "attachment.upload with `url` requires `documentId` (string, UUID) — outline's createFromUrl endpoint refuses document attachments without a target document. " +
+          documentId.error,
       });
     }
-    const body = { name: args.name, url: args.url, documentId: args.documentId, preset };
+    const body = { name: args.name, url: args.url, documentId: documentId.value, preset };
     let attachment: any;
     try {
       const data = await outlineFetch(cfg, "attachments.createFromUrl", body);
@@ -677,7 +781,7 @@ async function dispatchAttachment(
       return textResult({
         error: "源 URL 不可达或抓取失败,附件为空",
         method: "attachments.createFromUrl",
-        request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+        request: { name: args.name, url: args.url, documentId: documentId.value, preset },
         attachment,
       });
     }
@@ -685,7 +789,7 @@ async function dispatchAttachment(
     return textResult({
       ok: true,
       method: "attachments.createFromUrl",
-      request: { name: args.name, url: args.url, documentId: args.documentId, preset },
+      request: { name: args.name, url: args.url, documentId: documentId.value, preset },
       attachment,
       summary: attachment ? { id: attachment.id, name: args.name, url: attachment.url ?? null } : null,
     });
@@ -698,10 +802,12 @@ async function dispatchAttachment(
     typeof args.contentType === "string" && args.contentType.length > 0
       ? args.contentType
       : "application/octet-stream";
-  const documentId =
-    typeof args.documentId === "string" && args.documentId.length > 0
-      ? args.documentId
-      : undefined;
+  // CP-3752: `documentId` accepts a string or an integer and is trimmed.
+  const optionalDocumentId = normalizeOptionalId(args.documentId, "documentId");
+  if (!optionalDocumentId.ok) {
+    return textResult({ error: optionalDocumentId.error });
+  }
+  const documentId = optionalDocumentId.value;
 
   let buffer: Buffer;
   try {
@@ -834,11 +940,9 @@ function textResult(data: Record<string, unknown>): { content: { type: string; t
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data, isError: data?.error ? true : false };
 }
 
-// Mirrors index.ts: only accept finite numbers, fall back to a default for
-// missing / non-numeric values. Used by search (limit, offset) etc.
-function pickNumber(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
+// CP-3752: pagination / ID normalization now lives in
+// `src/param-normalize.ts` and is shared with the MCP path
+// (`src/index.ts`) so the two call paths cannot drift.
 
 // CP-2379 trim helpers — mirror src/index.ts `trimDocBody` / `trimSearchHit`
 // so the CLI and MCP tool produce byte-for-byte identical response shapes.
@@ -1026,7 +1130,6 @@ export {
   dispatchSearch,
   dispatchAttachment,
   outlineFetch,
-  pickNumber,
   trimDocBody,
   trimSearchHit,
   trimCreateRequest,

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-25
+
+### Added
+- **Parameter normalization (CP-3752)** — the plugin's argument layer is now lenient about *types* while staying strict about *content*. Both call paths (the OpenClaw named tools and the `outline-tool` CLI) share one implementation in the new module `src/param-normalize.ts`, so they cannot drift:
+  - **ID-like parameters** (`id`, `collectionId`, `parentDocumentId`, `documentId`) accept a **string or an integer** and are trimmed to a string before the request is sent (`12345` → `"12345"`, `"  <uuid>  "` → `"<uuid>"`). Objects, arrays, booleans, `null` and non-integer numbers are still **rejected** with an explicit error — they are never coerced through `String(value)`.
+  - **Pagination parameters** (`limit`, `offset`) accept a **number or a numeric string** (`"10"`, `" 10 "`). A `limit` above the Outline API maximum is **clamped** to 100 (`outline_rev_log.limit` clamps to 20) instead of failing the call — the ceiling comes from the Outline server's `shared/constants.ts` → `Pagination.maxLimit = 100`. Non-integer values and values below the minimum (`limit < 1`, `offset < 0`) are rejected with an explicit error.
+  - The tool schemas were widened accordingly (`Type.Union([Type.String(), Type.Integer()])` for IDs, `Type.Union([Type.Integer(), Type.String(...)])` for pagination) so an agent that guessed the wrong type no longer dead-ends at the schema layer with `must be string` / `must be integer`.
+
+### Fixed
+- An agent that passed a numeric document id, an id copied with surrounding whitespace, or a numeric string for `limit` / `offset` used to be rejected by the tool schema before the plugin ever ran. The id / pagination now reach the Outline API in their normalized form, so a wrong guess at the parameter type costs a normal round-trip instead of a dead end.
+- `outline_collection_list` / `outline_doc_list` / `outline_search_query` with an over-large `limit` (e.g. `5000`) used to be forwarded verbatim and rejected server-side (`Pagination limit is too large (max 100)`); the value is now clamped to the server maximum locally.
+
+### Changed
+- `package.json` version bumped `0.5.4` → `0.5.5`.
+
+### Notes
+- **Content parameters stay strict.** `title`, `text`, `query`, `url`, `path`, `name`, `changelog` and `findText` are still plain `Type.String()` — an object or an array is rejected with an explicit error, never silently `String()`-ified. The CP-3689 patch guardrail compares the submitted `text` / `findText` byte-for-byte against the stored body, so re-formatting those parameters would silently weaken the guardrail.
+- The pre-existing "a non-numeric `limit` string falls back to the default" contract is preserved verbatim (`limit: "not-a-number"` → 25), so the CLI and the MCP path keep producing byte-identical wire bodies.
+- **This plugin has no array-typed parameters** (`Type.Array` appears 0 times in `src/`), so the "normalize array members" item of the parent task is N/A for this plugin.
+
 ## [0.5.4] - 2026-10-25
 
 ### Fixed

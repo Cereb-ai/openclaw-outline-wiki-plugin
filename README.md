@@ -1,7 +1,7 @@
 # @cereb/outline-wiki-openclaw-plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.5.5-blue.svg)](package.json)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-%3E%3D2026.5.17-purple.svg)](https://docs.openclaw.ai)
 
 OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named tools** (one per Outline REST method), each invocable directly from an OpenClaw agent or the bundled `outline-tool` CLI. Replaces the legacy single-dispatcher pattern with one named tool per Outline REST method.
@@ -13,6 +13,7 @@ OpenClaw native plugin for Outline Wiki knowledge bases — exposes **15 named t
 - **CLI ↔ MCP aligned behavior** — every method's parameters, defaults, fallbacks, and verify behavior are consistent between the OpenClaw tool and the CLI (e.g. `outline_search_query.limit` defaults to `25`, `outline_doc_create.collectionId` falls back to `defaultCollectionId` config, post-create verify via `documents.info`). See `skills/outline-wiki/SKILL.md` for the behavior table.
 - **Document hierarchy** — `outline_doc_create` and `outline_doc_move` accept an optional `parentDocumentId` to nest a document under a parent in the same call.
 - **Fail-fast on missing config** — clear error messages, never silent fallback.
+- **Lenient parameter types** — ID parameters accept `string | number` (trimmed) and pagination accepts `number | numeric string` (clamped to the Outline API maximum) on both the MCP and the CLI path, so a wrong guess at the parameter type no longer dead-ends at the schema layer. Content parameters stay strict.
 - **Single round-trip** — `outline_doc_get` already returns the full markdown body in `data.text`; no second `documents.export` call needed.
 
 ## Tools
@@ -162,6 +163,9 @@ For your awareness as a caller: the OpenClaw named tool and the `outline-tool` C
 - `outline_doc_create` verifies the result via `documents.info` (`data.id` non-empty); verify failure → error.
 - `outline_doc_update` accepts `editMode` (one of `replace` (default) / `append` / `prepend` / `patch`), `findText` (required when `editMode=patch` — server returns 400 if missing or 404 if not matched; never a silent full-document replace), `publish`, `changelog` (best-effort revision-name write), `strictChangelog` (when `true`, changelog write failure hard-fails the response).
 - `outline_search_query.limit` defaults to **25** (not 10) via `pickNumber(args.limit, 25)`.
+- ID-like parameters (`id` / `collectionId` / `parentDocumentId` / `documentId`) accept a **string or an integer** and are trimmed to a string before the request is sent. Invalid types (object / array / boolean / null) are rejected with an explicit error — never silently `String()`-ified.
+- Pagination parameters (`limit` / `offset`) accept a **number or a numeric string**. A `limit` above the Outline API maximum is **clamped** to 100 (`outline_rev_log.limit` clamps to 20) instead of failing the call; a non-integer or below-minimum value is rejected.
+- Content parameters (`title` / `text` / `query` / `url` / `path` / `name` / `changelog`) stay **strictly string** — the CP-3689 patch guardrail compares the submitted text byte-for-byte, so it must never be re-formatted.
 
 If you notice drift between the two paths in practice, please file an issue — the development side will harden `tests/cli-vs-mcp-parity.test.ts` and fix the drift. See `skills/outline-wiki/SKILL.md` for the full behavior table.
 
