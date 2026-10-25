@@ -1,6 +1,7 @@
 ---
 name: outline-wiki
-description: OpenClaw outline-wiki 知识库原生插件. 提供两条调用路径:
+description: >-
+  OpenClaw outline-wiki 知识库原生插件. 提供两条调用路径:
   1) OpenClaw 原生 tools: 15 个独立 named tool (`outline_doc_*` / `outline_search_query` / `outline_collection_*` / `outline_attachment_upload` / `outline_rev_log`)
   2) 独立 CLI `outline-tool` (非 OpenClaw 原生 agent 如 codex / 任意 shell, 不依赖 OpenClaw, 方法名与 MCP 100% 对齐: `outline_*` 全名或短 category.method 均可用)
   15 个 method, 4 个 category: doc / search / collection / attachment. 当用户说"找 outline 上 XXX 文档"、"读一下 wiki 上的 XXX"、"在 outline 上写一篇 XXX"、"改一下 outline 上 XXX 文档"、"删一下 outline 上的 XXX"、"归档 XXX"、"在 outline 上传一张图片"、"看 outline 文档的修改记录"时触发.

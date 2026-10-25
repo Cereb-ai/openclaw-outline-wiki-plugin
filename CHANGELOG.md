@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-25
+
+### Fixed
+- `skills/outline-wiki/SKILL.md` frontmatter no longer fails to parse. The `description:` was a multi-line plain scalar whose third line contained a colon followed by a space (`15 个 method, 4 个 category: doc / search / collection / attachment.`), so YAML read it as a nested mapping and aborted the whole frontmatter with `BAD_INDENT: All mapping items must start at the same column`. OpenClaw then logged `Skipping invalid skill: .../skills/outline-wiki/SKILL.md` and dropped the `outline-wiki` skill entirely (the plugin tools stayed available, but agents lost the usage guide). The `description:` is now a `>-` block scalar, so the frontmatter parses as a plain mapping again.
+- The `description` text itself is unchanged — the same 561 characters, in the same order, ending with `…时触发.`. Only the YAML presentation (plain scalar → folded block scalar) changed; no wording was added, removed, or rewritten.
+
+### Changed
+- `package.json` version bumped `0.5.3` → `0.5.4`.
+
 ## [0.5.3] - 2026-10-23
 
 ### Added
