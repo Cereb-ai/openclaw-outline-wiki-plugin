@@ -68,17 +68,29 @@ outline-tool --help
 
 ---
 
-## 参数类型归一化 (CP-3752, v0.5.5+)
+## 参数类型归一化 (CP-3752 / CP-3768, v0.5.6+)
 
 > **参数类型宽松化**: ID 类参数和分页参数不再被 schema 层类型卡死. 两条调用路径 (OpenClaw 原生 tool / `outline-tool` CLI) 行为完全一致.
 
 | 参数类别 | 涉及参数 | 接受的类型 | 归一化 / 边界行为 |
 |---|---|---|---|
 | **ID 类** | `id`, `collectionId`, `parentDocumentId`, `documentId` | string **或** integer | 统一 trim 后按 string 发出 (`12345` → `"12345"`); **对象 / 数组 / 布尔 / null / 非整数数字一律拒绝** (明确报错, 绝不静默 `String()` 化) |
-| **分页类** | `limit`, `offset` | number **或** 数字字符串 (`"10"` / `" 10 "`) | 超过 Outline API 上限的 `limit` **clamp** 到 100 (不报错); `outline_rev_log.limit` clamp 到 20; 非整数 / 低于下限 (limit < 1, offset < 0) 拒绝; 完全非数字的字符串回落默认值 (`limit` → 25) |
+| **分页类** | `limit`, `offset` | number **或** 数字字符串 (`"10"` / `" 10 "`) | 超过 Outline API 上限的 `limit` **clamp** 到 100 (不报错); `outline_rev_log.limit` clamp 到 20; 非整数 / 低于下限 (limit < 1, offset < 0) 拒绝; **非数字字符串 (如 `"abc"`) 拒绝** (CP-3768 起不再回落默认值 — 见下方说明) |
 | **内容类** | `title`, `text`, `query`, `url`, `path`, `name`, `changelog`, `findText` | **仅 string** | 保持严格 — 传对象 / 数组一律拒绝. `text` / `findText` 逐字节不变 (CP-3689 patch 护栏依赖这一点) |
 
 **注意**: 本插件**没有数组类参数** (`Type.Array` 0 处), 所以「数组成员项归一化」一项为 N/A.
+
+### 注册 schema 形态 (CP-3768, v0.5.6+)
+
+ID 类与分页类参数在**注册 schema** 里声明为 JSON Schema 的 **type 数组** (`"type": ["string", "integer"]` / `"type": ["integer", "string"]`), 而不是 union 关键字.
+
+**为什么**: DeepSeek provider 的 tool-compat hook 把 union 关键字列为不支持, 会把 union **压平到第一个分支** (`selected = nonNullVariants[0]`). 压平后的 schema 同时是**模型可见签名**和 **tool_call 入参校验**的依据 — 所以 union 形态下 `id` 只剩 string、`limit` 只剩 number, agent 传数字 / 数字字符串照样被 schema 拒. type 数组形态不带 union 关键字, 能原样穿过该 hook, 模型看到的就是 `string | integer`.
+
+**对调用方的影响**: 接受的类型集合**完全没变**, 只是**校验所在的位置**从 schema 层挪到了 handler 层.
+
+- `limit` / `offset` 的取值范围 (正整数 / 非负整数) 与数字字符串的格式, 现在由 handler (`src/param-normalize.ts`) 校验 — 报错信息是插件自己的错误, 不是 schema 层的 `Invalid arguments`.
+- 因此 **非数字字符串 (`"abc"`) 现在会被明确拒绝**, 不再静默回落默认值 (`limit` → 25). 这是与 v0.5.5 的唯一行为差异: 该值在旧 schema 层同样被拒 (旧 schema 的字符串分支带 numeric pattern), 只是拒绝的位置不同.
+- 两条调用路径 (MCP tool / CLI) 共享同一份 handler 实现, 拒绝行为完全一致.
 
 ---
 
@@ -362,7 +374,7 @@ outline_rev_log { documentId: "<doc-uuid>", limit: 10 }
 | `outline_doc_update.strictChangelog` | 接受 `strictChangelog` (bool, 默认 false); `true` 时 changelog 写失败 → 返回硬失败 | 同左 |
 | `outline_search_query.limit` 默认值 | `pickNumber(args.limit, 25)` — 即默认 **25** | 同左 |
 | `ID 类参数` (`id` / `collectionId` / `parentDocumentId` / `documentId`) | 接受 string \| integer, trim 后按 string 发出; 非法类型 (对象/数组/布尔/null) 明确报错 | 同左 (共享 `src/param-normalize.ts`) |
-| `分页类参数` (`limit` / `offset`) | 接受 number \| 数字字符串; 越界 `limit` clamp 到 100 (`rev_log` clamp 到 20), 不报错 | 同左 (共享 `src/param-normalize.ts`) |
+| `分页类参数` (`limit` / `offset`) | 接受 number \| 数字字符串; 越界 `limit` clamp 到 100 (`rev_log` clamp 到 20), 不报错; 非数字字符串 (如 `"abc"`) 拒绝 (CP-3768 起由 handler 校验, 不再回落默认值) | 同左 (共享 `src/param-normalize.ts`) |
 | `内容类参数` (`title` / `text` / `query` / `url` / `path` / `name` / `changelog`) | 严格 string, 对象/数组拒绝 (不静默 String() 化) | 同左 |
 
 **调用方关注点**:

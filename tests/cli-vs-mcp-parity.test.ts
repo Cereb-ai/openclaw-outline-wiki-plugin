@@ -530,17 +530,31 @@ describe("CLI ↔ MCP parity: request body construction", () => {
       });
     });
 
-    test("non-numeric limit falls back to 25 (both paths match)", async () => {
+    test("a non-numeric limit is rejected identically on both paths (CP-3768)", async () => {
+      // CP-3768: the pre-CP-3768 tool schema carried a numeric pattern on
+      // `limit`'s string branch, so `"not-a-number"` never reached the
+      // handler. The schema now emits a bare JSON Schema type array (the
+      // provider compat hook drops union keywords and their constraints),
+      // so the pattern moved into the shared handler in
+      // `src/param-normalize.ts`. The value is still refused — now by
+      // the handler — and BOTH call paths must refuse it identically.
       const args = { query: "x", limit: "not-a-number" as unknown as number };
-      const mcp = await captureMcpBodies("outline_search_query", args, [
-        jsonResponse({ data: [] }),
-      ]);
-      const cli = await captureCliBodies(
-        () => dispatchSearch("query", args, cfg) as Promise<unknown>,
-        [jsonResponse({ data: [] })],
-      );
-      expect(cli[0]).toEqual(mcp[0]);
-      expect(cli[0].limit).toBe(25);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const mcpTool = getMcpTool("outline_search_query");
+      const mcpResult = await mcpTool.execute("test-call-id", args);
+      const mcpDetails = JSON.parse(mcpResult.content[0].text).details;
+      expect(mcpDetails.ok).toBeUndefined();
+      expect(mcpDetails.error).toContain("limit");
+
+      const cliResult = await dispatchSearch("query", args, cfg);
+      const cliDetails = JSON.parse((cliResult as any).content[0].text);
+      expect(cliDetails.ok).toBeUndefined();
+      expect(cliDetails.error).toContain("limit");
+
+      // Both paths refused it before any HTTP request was made.
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 

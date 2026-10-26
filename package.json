@@ -1,8 +1,8 @@
 {
   "name": "@cereb/outline-wiki-openclaw-plugin",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "type": "module",
-  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.5: CP-3752 parameter normalization — ID parameters accept string|number, pagination accepts number|numeric string and clamps to the Outline API maximum; content parameters stay strict)",
+  "description": "OpenClaw native plugin for Outline Wiki knowledge base. 14 named tools (defineToolPlugin) — one per outline category.method. Replaces the 0.3.x single-dispatcher `outline_wiki` tool. (0.5.6: CP-3768 registered schema emits the JSON Schema type-array form instead of a union keyword, so the DeepSeek provider tool-compat hook no longer flattens ID / pagination parameters to a single type)",
   "license": "MIT",
   "author": {
     "name": "Leo Wang",

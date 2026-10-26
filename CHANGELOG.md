@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-26
+
+### Fixed
+- **The registered tool schema no longer uses the JSON Schema union keyword** (CP-3768). The ID / pagination aliases were widened with TypeBox's union builder, which serializes to a JSON Schema *union keyword*. The `@openclaw/deepseek-provider` tool-compat hook lists that keyword (and its "exactly one of" sibling) as **unsupported** and flattens the union down to its FIRST branch (`selected = nonNullVariants[0]`). The flattened schema is what the model sees **and** what the `tool_call` argument validator enforces — so after CP-3752 a numeric `id` or a numeric-string `limit` was still refused at the schema layer, even though the handler would have accepted it. This is the root cause of CP-3740's final acceptance failure.
+  - The three aliases now emit the JSON Schema **type array** form instead, which carries the same accept-set but uses no union keyword and therefore survives the provider hook untouched:
+    - `IdSchema` → `{ "type": ["string", "integer"] }`
+    - `LimitSchema` → `{ "type": ["integer", "string"] }`
+    - `OffsetSchema` → `{ "type": ["integer", "string"] }`
+  - The model-visible signature for an ID parameter is now `string | integer` instead of a collapsed single type.
+  - The type array cannot express a range, so the constraints the old schema carried on its union branches (`minimum: 1` on `limit`, `minimum: 0` on `offset`, and the numeric patterns on their string branches) moved to the shared handler in `src/param-normalize.ts`. **The accept-set is unchanged**: every value the old schema accepted is still accepted, and every value it refused is still refused — only the layer that refuses it moved. `limit: 0` / `limit: "0"` / `limit: "abc"` and `offset: "-1"` are now refused by the handler with an explicit error instead of by the schema.
+  - Affected fields (all 15 registered tools): `doc_list` (`limit` / `offset` / `collectionId`), `doc_get` (`id`), `doc_create` (`collectionId` / `parentDocumentId`), `doc_update` (`id`), `doc_delete` (`id`), `doc_archive` (`id`), `doc_restore` (`id`), `doc_move` (`id` / `collectionId` / `parentDocumentId`), `search_query` (`limit` / `offset` / `collectionId`), `collection_list` (`limit` / `offset`), `collection_documents` (`id` / `limit` / `offset`), `collection_update` (`id`), `rev_log` (`documentId` / `limit`), `attachment_upload` (`documentId`).
+
+### Changed
+- `package.json` version bumped `0.5.5` → `0.5.6`.
+- `openclaw.plugin.json` version bumped `0.5.2` → `0.5.6` — this also **fixes the pre-existing version drift** between the two manifests (`package.json` said `0.5.5` while `openclaw.plugin.json` still said `0.5.2`). Both files now carry the same version.
+- A **non-numeric** `limit` / `offset` string (e.g. `"not-a-number"`) is now refused with an explicit error instead of silently falling back to the default. The pre-CP-3768 schema refused such a value at the schema layer (its string branch carried a numeric pattern); the handler now enforces the same pattern, so nothing that used to be refused became accepted.
+
+### Notes
+- **Content parameters stay strict.** `title`, `text`, `query`, `url`, `path`, `name`, `changelog` and `findText` are untouched — still a plain `Type.String()`, still rejected when given an object or an array. The CP-3689 patch guardrail compares the submitted `text` / `findText` byte-for-byte against the stored body, so re-formatting those parameters would silently weaken the guardrail.
+- **Handler semantics are unchanged otherwise**: ID trim / reject, `limit` / `offset` validation, the `> 100` clamp (and the `20` clamp for `outline_rev_log`) all behave exactly as before, and the CLI (`outline-tool`) and the MCP path still share one implementation in `src/param-normalize.ts`.
+- The OpenClaw core was **not** touched — the fix is entirely plugin-side, per Leo's 2026-10-26 01:44Z decision.
+
 ## [0.5.5] - 2026-10-25
 
 ### Added
