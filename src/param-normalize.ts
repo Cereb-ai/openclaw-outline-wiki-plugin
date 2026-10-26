@@ -1,5 +1,5 @@
 /**
- * CP-3752 — shared parameter normalization for the outline plugin.
+ * CP-3752 / CP-3768 — shared parameter normalization for the outline plugin.
  *
  * The OpenClaw tool schema is the first gate an agent's arguments pass
  * through, and it used to be strict about types: `id` had to be a string
@@ -26,6 +26,34 @@
  * `changelog`, `findText`, …) are deliberately NOT handled here: they
  * stay byte-exact so the patch guardrail (`src/patch-guard.ts`) keeps
  * comparing the submitted text verbatim (CP-3689).
+ *
+ * ===== CP-3768: this module is now the ONLY gate for value ranges =====
+ *
+ * The registered tool schema (see `src/index.ts`) used to spell the
+ * accepted types as a JSON Schema union keyword, which the
+ * `@openclaw/deepseek-provider` tool-compat hook flattens down to its
+ * first branch — so the schema the model sees AND the schema the
+ * tool-call validator enforces both collapsed to a single type, and the
+ * `minimum` / `pattern` keywords that rode along on the union branches
+ * were dropped with them.
+ *
+ * The aliases now emit the JSON Schema **type array** form
+ * (`{ "type": ["string", "integer"] }`), which survives that hook
+ * untouched — but a type array carries no range information. Every
+ * constraint that the old schema expressed therefore lives HERE, in the
+ * handler layer:
+ *
+ *   - `limit`  → a positive integer (the old schema's `minimum: 1` on
+ *     the numeric branch and its `^\s*0*[1-9]\d*\s*$` pattern on the
+ *     string branch). `limit: 0` / `limit: "0"` / `limit: "abc"` are
+ *     rejected with an explicit error, not silently coerced.
+ *   - `offset` → a non-negative integer (the old schema's `minimum: 0`
+ *     and `^\s*\d+\s*$` pattern). `offset: "-1"` is rejected.
+ *
+ * The accept-set is therefore UNCHANGED end-to-end: the only difference
+ * is WHERE the check happens (handler instead of schema). A value that
+ * the old schema refused is still refused — just with the plugin's own
+ * error message instead of a schema-level `Invalid arguments`.
  */
 
 /**
@@ -110,6 +138,27 @@ export function normalizeOptionalId(
 }
 
 /**
+ * Numeric-string pattern for `limit`: optional surrounding whitespace,
+ * optional leading zeros, then a positive integer without leading zeros.
+ *
+ * This is the SAME pattern the pre-CP-3768 `LimitSchema` carried on its
+ * string branch (`^\\s*0*[1-9]\\d*\\s*$`). It is now enforced here
+ * because the registered schema emits a bare JSON Schema type array,
+ * which cannot express a pattern.
+ */
+const LIMIT_STRING_PATTERN = /^\s*0*[1-9]\d*\s*$/;
+
+/**
+ * Numeric-string pattern for `offset`: optional surrounding whitespace
+ * then digits (a non-negative integer).
+ *
+ * Same story as {@link LIMIT_STRING_PATTERN}: this is the pattern the
+ * pre-CP-3768 `OffsetSchema` carried on its string branch
+ * (`^\\s*\\d+\\s*$`), now enforced by the handler.
+ */
+const OFFSET_STRING_PATTERN = /^\s*\d+\s*$/;
+
+/**
  * Normalize a pagination parameter (`limit` / `offset`).
  *
  * Accepts a number or a numeric string (with optional surrounding
@@ -118,18 +167,36 @@ export function normalizeOptionalId(
  * Failure modes (all rejected with an explicit error):
  *   - a numeric value that is not an integer (`1.5`, `"1.5"`)
  *   - a numeric value below `min` (`0` for limit, `-1` for offset)
+ *   - a string that is not a valid numeric string for this parameter
+ *     (`"abc"`, `""`, `"0"` for limit, `"-1"` for offset)
  *   - a value of an unsupported type (object / array / boolean)
  *
- * A string that is not numeric at all (`"not-a-number"`) falls back to
- * the default — that is the pre-existing plugin contract
- * (`pickNumber(args.limit, 25)`), preserved verbatim so the CLI and the
- * MCP path keep behaving identically.
+ * CP-3768: the numeric-string branch used to fall back to the default
+ * when the string was not numeric at all (`"not-a-number"` → 25).
+ * That fallback is GONE on purpose. The pre-CP-3768 tool schema refused
+ * such a value outright (its string branch carried a numeric pattern),
+ * so the schema was the gate that rejected it. The schema no longer
+ * carries that pattern — the type array cannot — so the handler
+ * takes over the check. Without this, `"abc"` would have silently
+ * become the default limit instead of being refused, i.e. a silent
+ * widening of the accepted input set.
+ *
+ * The accept-set is therefore unchanged: every value the old schema
+ * accepted is still accepted, and every value it refused is still
+ * refused — only the layer that refuses it moved.
  *
  * A value above `max` is clamped to `max` (never rejected).
  */
 export function normalizePagination(
   value: unknown,
-  opts: { label: string; fallback: number; min: number; max?: number },
+  opts: {
+    label: string;
+    fallback: number;
+    min: number;
+    max?: number;
+    /** Pattern the numeric string branch must satisfy. */
+    pattern?: RegExp;
+  },
 ): NormalizeResult<number> {
   const { label, fallback, min } = opts;
   const max = opts.max;
@@ -144,12 +211,21 @@ export function normalizePagination(
     parsed = value;
   } else if (typeof value === "string") {
     const trimmed = value.trim();
-    if (trimmed.length === 0) return ok(fallback);
+    if (trimmed.length === 0) {
+      return fail(
+        `\`${label}\` must be an integer (or a numeric string) — got an empty string.`,
+      );
+    }
+    if (opts.pattern && !opts.pattern.test(trimmed)) {
+      return fail(
+        `\`${label}\` must be an integer (or a numeric string) — got "${trimmed}".`,
+      );
+    }
     const asNumber = Number(trimmed);
     if (!Number.isFinite(asNumber)) {
-      // Not numeric at all — pre-existing contract: fall back to the
-      // default instead of failing the call.
-      return ok(fallback);
+      return fail(
+        `\`${label}\` must be an integer (or a numeric string) — got "${trimmed}".`,
+      );
     }
     parsed = asNumber;
   } else {
@@ -175,6 +251,10 @@ export function normalizePagination(
 
 /**
  * Normalize a `limit` parameter.
+ *
+ * `limit` must be a positive integer (minimum 1) or a numeric string
+ * that satisfies {@link LIMIT_STRING_PATTERN}; values above `max` are
+ * clamped to `max`.
  */
 export function normalizeLimit(
   value: unknown,
@@ -185,12 +265,14 @@ export function normalizeLimit(
     fallback: opts.fallback,
     min: opts.min ?? 1,
     max: opts.max,
+    pattern: LIMIT_STRING_PATTERN,
   });
 }
 
 /**
  * Normalize an `offset` parameter. `offset` has no upper bound in the
- * Outline pagination middleware, so it is only lower-bounded.
+ * Outline pagination middleware, so it is only lower-bounded (0). Its
+ * numeric-string branch must satisfy {@link OFFSET_STRING_PATTERN}.
  */
 export function normalizeOffset(
   value: unknown,
@@ -200,5 +282,6 @@ export function normalizeOffset(
     label: opts.label,
     fallback: opts.fallback,
     min: opts.min ?? 0,
+    pattern: OFFSET_STRING_PATTERN,
   });
 }

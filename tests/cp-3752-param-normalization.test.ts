@@ -304,26 +304,61 @@ describe("CP-3752: parameter normalization", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    test("the schema refuses limit=0 / limit=\"0\" (schema and runtime agree)", async () => {
-      // The schema's string branch only accepts POSITIVE integers, so the
-      // tool schema and OpenClaw's runtime validator agree on what a valid
-      // `limit` is — `limit: 0` never slips past the schema as a string.
+    test("the handler refuses limit=0 / limit=\"0\" (CP-3768: the gate moved from schema to handler)", async () => {
+      // CP-3768: the registered schema now emits a bare JSON Schema type
+      // array (`{ "type": ["integer", "string"] }`), which cannot carry the
+      // `minimum: 1` / numeric-pattern constraints the old union schema
+      // expressed — and the provider compat hook drops those keywords
+      // anyway. The constraint therefore moved to the handler layer
+      // (`src/param-normalize.ts`), which is where the pre-CP-3768 schema
+      // refused `limit: 0` / `limit: "0"`. The accept-set is unchanged.
+      //
+      // The schema itself no longer rejects `limit: 0` — it accepts both
+      // branches of the type array — but the CALL still fails, with the
+      // plugin's own explicit error instead of a schema-level
+      // `Invalid arguments`.
+      const schema = JSON.parse(
+        JSON.stringify(getMcpTool("outline_collection_list").parameters),
+      );
+      // The schema accepts the numeric and numeric-string branches ...
+      expect(await validateAgainstSchema(schema, { limit: 20 })).toBe(true);
+      expect(await validateAgainstSchema(schema, { limit: "20" })).toBe(true);
+      // ... and the handler refuses the out-of-range values.
       for (const limit of [0, "0"]) {
+        const fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
         const tool = getMcpTool("outline_collection_list");
-        const schema = JSON.parse(JSON.stringify(tool.parameters));
-        expect(
-          await validateAgainstSchema(schema, { limit }),
-        ).toBe(false);
+        const result = await tool.execute("test-call-id", { limit });
+        const details = unwrapDetails(result);
+        expect(details.ok).toBeUndefined();
+        expect(details.error).toContain("limit");
+        expect(fetchMock).not.toHaveBeenCalled();
       }
     });
 
-    test("a non-numeric limit string falls back to the default (pre-existing contract)", async () => {
+    test("a non-numeric limit string is rejected by the handler (CP-3768)", async () => {
+      // CP-3768: the pre-CP-3768 schema's string branch carried the
+      // pattern `^\\s*0*[1-9]\\d*\\s*$`, so `"not-a-number"` was
+      // refused at the schema layer. The schema no longer carries a
+      // pattern, so the handler enforces it — the value is still
+      // refused (never silently coerced to the default).
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const tool = getMcpTool("outline_collection_list");
+      const result = await tool.execute("test-call-id", { limit: "not-a-number" });
+      const details = unwrapDetails(result);
+      expect(details.ok).toBeUndefined();
+      expect(details.error).toContain("limit");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test("a numeric-string limit with surrounding whitespace is accepted", async () => {
       const bodies = await captureMcpBodies(
         "outline_collection_list",
-        { limit: "not-a-number" },
+        { limit: " 20 " },
         [jsonResponse({ data: [] })],
       );
-      expect(bodies[0].limit).toBe(25);
+      expect(bodies[0].limit).toBe(20);
     });
   });
 

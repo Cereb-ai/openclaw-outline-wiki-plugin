@@ -66,7 +66,7 @@ const ATTACHMENT_PRESETS = [
   "emoji",
 ] as const;
 
-// ===== CP-3752: lenient parameter schemas =====
+// ===== CP-3752 / CP-3768: lenient parameter schemas =====
 //
 // ID-like parameters (`id`, `collectionId`, `parentDocumentId`,
 // `documentId`) accept a string OR an integer; pagination parameters
@@ -79,41 +79,71 @@ const ATTACHMENT_PRESETS = [
 // silently stringifying an object/array would corrupt document bodies
 // and would break the CP-3689 patch guardrail, which compares the
 // submitted text byte-for-byte against the stored body.
+//
+// ===== CP-3768: why the JSON Schema "type array" form =====
+//
+// CP-3752 originally widened these aliases with TypeBox's union builder,
+// which serializes to the JSON Schema *union keyword* (a list of
+// alternative per-type schemas under a single keyword). The
+// `@openclaw/deepseek-provider` tool-compat hook lists that keyword —
+// and its "exactly one of" sibling — as unsupported, and flattens the
+// union down to its FIRST branch (`selected = nonNullVariants[0]`). The
+// flattened schema is what the model sees AND what the `tool_call`
+// argument validator enforces, so a numeric `id` or a numeric-string
+// `limit` was still rejected at the schema layer even though the handler
+// would have accepted it.
+//
+// The fix is to emit the JSON Schema **type array** form instead:
+// `{ "type": ["string", "integer"] }`. It carries the same "either of
+// these two types" meaning, but it uses no union keyword at all, so the
+// provider hook leaves it untouched and the model-visible signature stays
+// `string | integer`.
+//
+// Type-level note: `Type.Unsafe<T>(...)` keeps the static type `T` (it is
+// the TypeBox escape hatch for schemas whose static type cannot be
+// inferred from the JSON Schema shape). The runtime shape is exactly the
+// JSON Schema we hand in — no extra keys are added.
+//
+// The `minimum` / `pattern` constraints that the old union branches
+// carried are NOT silently dropped: they are enforced by the handler in
+// `src/param-normalize.ts` (`limit < 1` and `offset < 0` are rejected
+// with an explicit error, over-large values are clamped), which is the
+// same layer that already owned the normalization semantics.
 
 /** ID-like parameter: string or integer (trimmed to a string). */
 function IdSchema(description: string) {
-  return Type.Union([Type.String(), Type.Integer()], { description });
+  return Type.Unsafe<string | number>({
+    type: ["string", "integer"],
+    description,
+  });
 }
 
 /**
  * Pagination `limit`: integer or numeric string. Values above the
  * server maximum are clamped by the handler (never rejected).
  *
- * The string branch only accepts POSITIVE integers (leading zeros are
- * tolerated, e.g. `"007"` → 7), so the schema and OpenClaw's runtime
- * validator agree on what a valid `limit` is: `limit: 0` / `limit: "0"`
- * is refused by the schema instead of being coerced into a string that
- * only the handler would catch.
+ * The handler in `src/param-normalize.ts` owns the range check: a
+ * `limit` below 1 is rejected with an explicit error and an over-large
+ * `limit` is clamped to the Outline API maximum (100; 20 for
+ * `outline_rev_log`).
  */
 function LimitSchema(description: string) {
-  return Type.Union(
-    [
-      Type.Integer({ minimum: 1 }),
-      Type.String({ pattern: "^\\s*0*[1-9]\\d*\\s*$" }),
-    ],
-    { description },
-  );
+  return Type.Unsafe<number | string>({
+    type: ["integer", "string"],
+    description,
+  });
 }
 
 /**
  * Pagination `offset`: integer or numeric string. `offset` has no upper
- * bound in the Outline pagination middleware.
+ * bound in the Outline pagination middleware; a negative `offset` is
+ * rejected by the handler.
  */
 function OffsetSchema(description: string) {
-  return Type.Union(
-    [Type.Integer({ minimum: 0 }), Type.String({ pattern: "^\\s*\\d+\\s*$" })],
-    { description },
-  );
+  return Type.Unsafe<number | string>({
+    type: ["integer", "string"],
+    description,
+  });
 }
 
 interface OutlineWikiConfig {
